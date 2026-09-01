@@ -401,7 +401,18 @@ def _get_redmine_client() -> Redmine:
     # (e.g., legacy mode, or background tasks).
     access_token = get_access_token()
     if access_token is not None and access_token.token:
-        # Per-request client with Bearer token (cannot be cached)
+        # SPIKE stage 2: a token this server issued through the Redmine login
+        # carries the caller's own api_key in its claims. Use that, so the
+        # request runs as the caller and not as some server-wide identity.
+        # isinstance rather than truthiness: a claims attribute that is not a
+        # mapping, or a value that is not a string, must not be mistaken for a
+        # key. Otherwise anything attribute-shaped passes as an identity.
+        claims = getattr(access_token, "claims", None)
+        bound_key = claims.get("redmine_api_key") if isinstance(claims, dict) else None
+        if isinstance(bound_key, str) and bound_key:
+            return _new_client(key=bound_key)
+
+        # OAuth modes: the token *is* a Redmine token, forward it.
         headers = {"Authorization": f"Bearer {access_token.token}"}
         return _new_client(requests={"headers": headers})
 

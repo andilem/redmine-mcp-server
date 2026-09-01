@@ -58,6 +58,14 @@ COPY --chown=appuser:appuser README.md ./
 RUN mkdir -p /app/logs /app/data && \
     chown -R appuser:appuser /app
 
+# Mount point for the binding store volume. It has to exist in the image
+# and be owned by appuser: Docker creates a missing mount point as root,
+# and a named volume inherits the ownership of the image directory it
+# covers. Without this the server cannot create /data/bindings/tokens and
+# dies at import with PermissionError.
+RUN mkdir -p /data/bindings && \
+    chown -R appuser:appuser /data
+
 # Switch to non-root user
 USER appuser
 

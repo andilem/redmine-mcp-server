@@ -44,6 +44,21 @@ def _select_auth_provider(auth_mode: str):
         from ._oauth_proxy import build_oauth_proxy
 
         return build_oauth_proxy()
+    if auth_mode == "redmine-login":  # SPIKE stage 2
+        from ._redmine_login import RedmineLoginProvider
+
+        base_url = os.getenv("REDMINE_MCP_BASE_URL", "http://localhost:52480")
+        store = None
+        store_dir = os.getenv("REDMINE_MCP_BINDING_STORE")
+        if store_dir:
+            from ._binding_store import BindingStore
+
+            store = BindingStore(store_dir)
+        return RedmineLoginProvider(
+            base_url=base_url.rstrip("/"),
+            redmine_url=os.environ["REDMINE_URL"].rstrip("/"),
+            store=store,
+        )
     return None
 
 

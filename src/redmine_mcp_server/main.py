@@ -65,7 +65,29 @@ if TOOL_ALLOW_LIST is not None:
     )
 
 REDMINE_AUTH_MODE = os.environ.get("REDMINE_AUTH_MODE", "legacy").lower()
-AUTHENTICATED_AUTH_MODES = {"oauth", "oauth-proxy"}
+AUTHENTICATED_AUTH_MODES = {
+    "oauth",
+    "oauth-proxy",
+    "redmine-login",  # SPIKE stage 2
+}
+
+
+if REDMINE_AUTH_MODE == "redmine-login" and AUTH_PROVIDER is not None:
+    # SPIKE stage 2: the login page lives next to /authorize and /token.
+    from ._redmine_login_routes import register_login_routes  # noqa: E402
+
+    register_login_routes(mcp, AUTH_PROVIDER, os.environ["REDMINE_URL"].rstrip("/"))
+    logger.warning(
+        "SPIKE auth mode redmine-login active. Callers sign in with "
+        "their Redmine credentials; the password is used once to fetch their "
+        "api_key and is never stored. Bindings %s.",
+        (
+            "survive a restart, encrypted under the caller's own token in "
+            f"{os.environ['REDMINE_MCP_BINDING_STORE']}"
+            if os.environ.get("REDMINE_MCP_BINDING_STORE")
+            else "live in memory only, so a restart signs everyone out"
+        ),
+    )
 
 
 def get_version() -> str:

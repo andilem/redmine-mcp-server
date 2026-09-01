@@ -1,0 +1,68 @@
+# Dauerbetrieb für REDMINE_AUTH_MODE=redmine-login.
+#
+# Bewusst OHNE REDMINE_API_KEY: in diesem Modus bringt jeder Nutzer seinen
+# eigenen Key über die Browser-Anmeldung mit. Hätte der Server einen eigenen,
+# würde ein Fehler in der Token-Bindung stillschweigend auf dieses Konto
+# zurückfallen statt sichtbar zu scheitern.
+services:
+  redmine-mcp-login:
+    build:
+      context: .
+    image: redmine-mcp-login:local
+    container_name: redmine-mcp-login
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:52479:8000"
+    environment:
+      REDMINE_AUTH_MODE: redmine-login
+      REDMINE_URL: https://psc.mmlab.de
+      # Muss die von außen erreichbare Adresse sein: der Server bewirbt sie
+      # als Issuer und in der Discovery, und leitet die Anmeldung dorthin.
+      REDMINE_MCP_BASE_URL: https://psc-mcp.mmlab.de
+      # Die In-Memory-Tokens tragen keine Redmine-Scopes; die erzwingende
+      # Middleware würde sonst jeden Tool-Aufruf ablehnen.
+      REDMINE_OAUTH_SCOPE_ENFORCEMENT: "off"
+
+      # Bindungen verschlüsselt unter dem Token des Clients ablegen, damit
+      # ein Neustart nicht alle abmeldet. Der Server kann im Ruhezustand
+      # nichts entschlüsseln: das Schlüsselmaterial kommt mit jeder Anfrage.
+      REDMINE_MCP_BINDING_STORE: /data/bindings
+
+      # Aus: die Allow-List ist die Schranke, und sie laesst bewusst acht
+      # schreibende Tools zu. Mit READ_ONLY=true waeren die sichtbar, aber
+      # jeder Aufruf wuerde abgelehnt -- die schlechteste der drei Varianten.
+      REDMINE_MCP_READ_ONLY: "false"
+      REDMINE_MCP_EXPOSE_ADMIN_TOOLS: "false"
+
+      # Der Werkzeugumfang, und mit READ_ONLY=false die einzige Schranke:
+      # was hier nicht steht, verschwindet aus tools/list und wird bei einem
+      # Aufruf abgelehnt. Die Namen stehen bewusst nicht hier, sondern auf
+      # dem Server unter /etc/redmine-mcp/allowed-tools.txt (siehe Mount
+      # unten), damit die Auswahl ohne Repo-Aenderung anpassbar bleibt: ein
+      # Name pro Zeile, "#" beginnt einen Kommentar. Aenderungen brauchen
+      # nur ein "restart", keinen Rebuild. Die Datei muss vor dem ersten
+      # "up" existieren -- fehlt sie, legt Docker an ihrer Stelle ein
+      # Verzeichnis an und der Server startet nicht.
+      REDMINE_MCP_ALLOW_TOOLS_FILE: /allowed-tools.txt
+
+      PUBLIC_HOST: psc-mcp.mmlab.de
+      PUBLIC_PORT: "443"
+
+      REDMINE_AGILE_ENABLED: "false"
+      REDMINE_TAGS_ENABLED: "false"
+      REDMINE_CHECKLISTS_ENABLED: "false"
+      REDMINE_PRODUCTS_ENABLED: "false"
+      REDMINE_CRM_ENABLED: "false"
+      REDMINE_DEALS_ENABLED: "false"
+      REDMINE_DMSF_ENABLED: "false"
+    volumes:
+      - bindings:/data/bindings
+      - /etc/redmine-mcp/allowed-tools.txt:/allowed-tools.txt:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  bindings:
