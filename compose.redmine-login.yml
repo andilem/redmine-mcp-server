@@ -45,6 +45,11 @@ services:
       # Verzeichnis an und der Server startet nicht.
       REDMINE_MCP_ALLOW_TOOLS_FILE: /allowed-tools.txt
 
+      # Temporaere Anhang-Downloads unter /app/attachments aufraeumen. Ohne
+      # das bleiben sie bis zum naechsten Recreate im Container liegen.
+      AUTO_CLEANUP_ENABLED: "true"
+      CLEANUP_INTERVAL_MINUTES: "10"
+
       PUBLIC_HOST: psc-mcp.mmlab.de
       PUBLIC_PORT: "443"
 
