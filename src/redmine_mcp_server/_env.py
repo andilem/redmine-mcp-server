@@ -24,6 +24,17 @@ def _is_tags_enabled() -> bool:
     return _is_true_env("REDMINE_TAGS_ENABLED", "false")
 
 
+def _is_easy_enabled() -> bool:
+    """Check if Easy Redmine support is enabled.
+
+    Easy Redmine is a commercial fork, not a plugin: it serves the same
+    ``/issues.json`` with extra attributes (``easy_sprint`` and friends) and
+    registers extra query filters. A stock Redmine has none of them, so the
+    flag keeps those keys out of requests and responses by default.
+    """
+    return _is_true_env("REDMINE_EASY_ENABLED", "false")
+
+
 def _is_checklists_enabled() -> bool:
     """Check if RedmineUP Checklists plugin support is enabled."""
     return _is_true_env("REDMINE_CHECKLISTS_ENABLED", "false")

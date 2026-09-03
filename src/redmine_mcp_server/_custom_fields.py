@@ -42,6 +42,14 @@ _STANDARD_ISSUE_UPDATE_FIELDS: Set[str] = {
     "deleted_attachment_ids",
     "custom_fields",
     "status_name",
+    # Easy Redmine attributes of IssueApiRequest. Standard rather than
+    # custom-field candidates on purpose: _normalize_field_label strips
+    # underscores, so a custom field named "Easy Sprint ID" normalizes to the
+    # same "easysprintid" as easy_sprint_id and would silently swallow the
+    # value. update_redmine_issue drops these when REDMINE_EASY_ENABLED is off.
+    "easy_sprint_id",
+    "easy_story_points",
+    "target_backlog",
 }
 
 
