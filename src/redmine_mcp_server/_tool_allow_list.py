@@ -42,7 +42,7 @@ _TOOL_KEY_PREFIX = "tool:"
 # Tools that exist but are registered only under a flag, so a correctly
 # spelled name can be absent from the registry. Allow-listing one of these
 # with its flag off is a no-op, not a typo, and must not be reported as one.
-CONDITIONALLY_REGISTERED = frozenset({"cleanup_attachment_files"})
+CONDITIONALLY_REGISTERED = frozenset({"cleanup_attachment_files", "list_easy_sprints"})
 
 
 def _denial_payload(tool_name: str) -> dict[str, Any]:

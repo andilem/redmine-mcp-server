@@ -241,6 +241,68 @@ Three properties are worth knowing:
 Because this is enforced by the server rather than the client, it holds for
 every user of a shared deployment.
 
+### Easy Redmine Sprints
+
+Easy Redmine is a commercial fork of Redmine, not a plugin. It serves the
+same `/issues.json` with extra attributes and its `EasyIssueQuery` registers
+extra filters, so `REDMINE_EASY_ENABLED=true` does not enable a feature so
+much as stop discarding what is already on the wire. On a stock Redmine the
+flag must stay off: none of these attributes exist there.
+
+With the flag on:
+
+- **Reading.** Issue responses carry `easy_sprint` (`{id, name, due_date}`,
+  or `null` when the issue is in no sprint), `easy_sprint_phase`,
+  `easy_sprint_position` and `easy_story_points`. No `include` is needed --
+  Easy Redmine sends them unconditionally. Each can be named in `fields`.
+- **Writing.** `update_redmine_issue` accepts `easy_sprint_id`,
+  `easy_story_points` and `target_backlog` (`project_backlog` or
+  `sprint_backlog`). These are attributes of Easy Redmine's own
+  `IssueApiRequest`, so they ride the standard issue update; no separate
+  endpoint is involved, unlike the RedmineUP Agile fields.
+- **Filtering.** `list_redmine_issues(filters={"easy_sprint_id": N})` lists
+  a sprint's issues. Only `easy_sprint_id` is accepted, because it is the
+  only Easy filter verified against a live instance: Redmine silently drops
+  an unregistered filter and answers 200 with the collection unnarrowed,
+  which a caller cannot tell apart from a filter that matched everything.
+
+#### Resolving a sprint name
+
+Easy Redmine exposes no sprint endpoint. `/easy_sprints.json` answers 403
+even with a valid API key, and the instance's own `/easy_swagger.json` lists
+no sprint path, so a sprint's *name* is unreachable over HTTP while its
+*id* is perfectly usable. `list_easy_sprints` closes that gap by reading the
+`easy_sprints` table directly:
+
+```bash
+REDMINE_EASY_ENABLED=true
+REDMINE_EASY_DB_URL=mysql://reader:secret@db.internal:3306/easyredmine
+```
+
+Use read-only credentials, and install the driver with the `easy` extra
+(`pip install 'redmine-mcp-server[easy]'`). Without the DSN the tool returns
+a `EASY_DB_NOT_CONFIGURED` error and everything else keeps working: setting a
+sprint by id never touches the database.
+
+The tool filters by `name` (substring), `active_on` (a date the sprint was
+running on -- pass today for "the current sprint"), `closed` and
+`project_id`. Several sprints can be running on one date, one per team being
+the normal case, so it returns a list.
+
+Two properties of the database path are worth knowing, because they are the
+reason it is scoped as narrowly as it is:
+
+- **A database read has no permissions.** It bypasses Redmine's
+  authorization entirely, so `list_easy_sprints` re-establishes it: every
+  sprint's project is fetched with the *caller's* API key, and a sprint in a
+  project the caller cannot open is dropped from the result. Sprints with no
+  project, and cross-project ones, are treated as global.
+- **There is no generic SQL tool, and there will not be one.** Only named,
+  parameterized queries exist. A "run this SELECT" tool would hand every
+  caller `users.hashed_password`, every stored API key and every private
+  issue -- read-only credentials are no defense, because reading is the
+  problem.
+
 ### Prompt Injection Protection
 
 All user-controlled content returned from Redmine (issue descriptions, journal notes, wiki page text, search excerpts, version descriptions) is automatically wrapped in unique boundary tags:

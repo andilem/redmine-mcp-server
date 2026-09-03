@@ -55,6 +55,11 @@ Changelog = "https://github.com/jztan/redmine-mcp-server/blob/develop/CHANGELOG.
 redmine-mcp-server = "redmine_mcp_server.main:main"
 
 [project.optional-dependencies]
+# Easy Redmine sprint lookups. Easy Redmine serves no sprint endpoint,
+# so the easy_sprints table is read directly through REDMINE_EASY_DB_URL.
+easy = [
+    "PyMySQL>=1.1,<2",
+]
 test = [
     "pytest>=7.0.0,<10",
     "pytest-asyncio>=0.21.0,<2",

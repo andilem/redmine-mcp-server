@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Easy Redmine sprint support behind `REDMINE_EASY_ENABLED` (default off).
+  Easy Redmine is a fork rather than a plugin: it serves the same
+  `/issues.json` with extra attributes, so most of this is a matter of not
+  discarding them. Issue reads now carry `easy_sprint`
+  (`{id, name, due_date}`), `easy_sprint_phase`, `easy_sprint_position` and
+  `easy_story_points`; `update_redmine_issue` accepts `easy_sprint_id`,
+  `easy_story_points` and `target_backlog`; and `list_redmine_issues` accepts
+  an `easy_sprint_id` filter, sending `set_filter=1` alongside it because
+  that is what engages Easy Query. `easy_sprint_id` also became a standard
+  update key rather than a custom-field-name candidate, which closes a trap:
+  underscores are stripped when matching names, so a custom field called
+  "Easy Sprint ID" would have swallowed the value silently.
+- `list_easy_sprints`, registered when `REDMINE_EASY_ENABLED=true`. Easy
+  Redmine exposes no sprint endpoint -- `/easy_sprints.json` answers 403 even
+  with a valid API key -- so a sprint *name* cannot be resolved over HTTP at
+  all. The tool reads the `easy_sprints` table through a read-only DSN in
+  `REDMINE_EASY_DB_URL` (needs the new `easy` extra for the PyMySQL driver),
+  filtered by name, `active_on` date, `closed` and project. Because a
+  database read carries no permissions, every sprint's project is re-checked
+  with the caller's own API key and sprints in projects they cannot open are
+  dropped. Only named, parameterized queries exist; there is deliberately no
+  generic SQL entry point.
 - `REDMINE_MCP_ALLOW_TOOLS` (and `REDMINE_MCP_ALLOW_TOOLS_FILE`) expose only
   the named tools; everything else is hidden from `tools/list` and refused by
   `call_tool` with a `TOOL_NOT_ALLOWED` envelope. Enforced by middleware, so

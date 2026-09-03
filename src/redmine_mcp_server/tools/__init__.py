@@ -9,6 +9,7 @@ from . import crm_notes  # noqa: F401  -- triggers @mcp.tool() registration
 from . import crm_queries  # noqa: F401  -- triggers @mcp.tool() registration
 from . import deals  # noqa: F401  -- triggers @mcp.tool() registration
 from . import documents  # noqa: F401  -- triggers @mcp.tool() registration
+from . import easy_sprints  # noqa: F401  -- triggers @mcp.tool() registration
 from . import enumeration  # noqa: F401  -- triggers @mcp.tool() registration
 from . import files  # noqa: F401  -- triggers @mcp.tool() registration
 from . import gantt  # noqa: F401  -- triggers @mcp.tool() registration
