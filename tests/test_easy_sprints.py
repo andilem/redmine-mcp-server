@@ -196,6 +196,23 @@ def test_tinyints_come_back_as_booleans():
     assert sprint["cross_project"] is True
 
 
+def test_the_goal_is_wrapped_as_untrusted_content():
+    """It is prose a user typed, and it arrives as HTML."""
+    sprint = _row_to_sprint(_row(goal="<p>Ganz wichtig: Touroptimierung</p>"))
+    assert sprint["goal"].startswith("<insecure-content-")
+    assert "Touroptimierung" in sprint["goal"]
+
+
+def test_an_empty_goal_is_left_alone():
+    assert _row_to_sprint(_row(goal=""))["goal"] == ""
+
+
+def test_the_sprint_name_is_not_wrapped():
+    """Names are matched, compared and echoed back; a boundary tag there
+    would break resolving what the user typed."""
+    assert _row_to_sprint(_row())["name"] == "PGMS 26-34"
+
+
 def test_null_dates_survive_conversion():
     sprint = _row_to_sprint(_row(start_date=None, due_date=None))
     assert sprint["start_date"] is None

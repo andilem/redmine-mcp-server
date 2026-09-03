@@ -29,6 +29,8 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 
+from ._serialization import wrap_insecure_content
+
 logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT_SECONDS = 5
@@ -145,7 +147,11 @@ def _row_to_sprint(row: Dict[str, Any]) -> Dict[str, Any]:
         "closed": bool(row["closed"]),
         "cross_project": bool(row["cross_project"]),
         "capacity": row["capacity"],
-        "goal": row["goal"],
+        # The goal is prose a user typed, and it arrives as HTML that can
+        # carry invisible text. Every other user-authored field on this
+        # server is wrapped before it reaches an LLM; coming from the
+        # database rather than the REST API changes nothing about that.
+        "goal": wrap_insecure_content(row["goal"]),
         "version_id": row["version_id"],
         "project_id": row["project_id"],
     }
