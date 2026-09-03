@@ -17,9 +17,13 @@ COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
 COPY README.md ./
 
-# Install dependencies and the project in a virtual environment
+# Install dependencies and the project in a virtual environment.
+# The `easy` extra pulls in PyMySQL, which list_easy_sprints needs: Easy
+# Redmine serves no sprint endpoint, so sprint names come from the
+# database. Pure Python and tiny, so it costs nothing on a deployment
+# that leaves REDMINE_EASY_ENABLED off.
 RUN uv venv /opt/venv && \
-    uv pip install . --python=/opt/venv/bin/python
+    uv pip install ".[easy]" --python=/opt/venv/bin/python
 
 # Production stage
 FROM python:3.13-slim AS runtime

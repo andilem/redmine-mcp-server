@@ -50,6 +50,24 @@ services:
       AUTO_CLEANUP_ENABLED: "true"
       CLEANUP_INTERVAL_MINUTES: "10"
 
+      # Easy Redmine ist ein Fork, kein Plugin: dieselbe /issues.json traegt
+      # easy_sprint & Co., und EasyIssueQuery kennt den Filter
+      # easy_sprint_id. Das Flag sagt nur, dass wir mit einem Easy sprechen.
+      # Registriert ausserdem list_easy_sprints -- damit es sichtbar wird,
+      # muss der Name auch in allowed-tools.txt stehen.
+      REDMINE_EASY_ENABLED: "true"
+
+      # Der read-only MySQL-DSN fuer die Sprint-Suche. Der Wert steht NICHT
+      # hier, sondern in der .env neben diesem File -- die ist gitignored,
+      # ein git pull oder reset --hard fasst sie also nicht an:
+      #
+      #   REDMINE_EASY_DB_URL=mysql://benutzer:passwort@host:3306/easyredmine
+      #
+      # Fehlt sie, wird hier ein Leerstring eingesetzt und der Server startet
+      # normal; nur list_easy_sprints antwortet dann mit
+      # EASY_DB_NOT_CONFIGURED. Sprint per ID setzen geht ohne DB.
+      REDMINE_EASY_DB_URL: ${REDMINE_EASY_DB_URL:-}
+
       PUBLIC_HOST: psc-mcp.mmlab.de
       PUBLIC_PORT: "443"
 
