@@ -102,6 +102,19 @@ def test_a_dsn_without_a_database_is_refused(monkeypatch):
         _connection_params()
 
 
+def test_a_dsn_without_a_host_is_refused(monkeypatch):
+    """No silent localhost fallback: in a container that is the container."""
+    monkeypatch.setenv("REDMINE_EASY_DB_URL", "mysql:///easyredmine")
+    with pytest.raises(RuntimeError, match="names no host"):
+        _connection_params()
+
+
+def test_the_missing_host_message_names_the_container_trap(monkeypatch):
+    monkeypatch.setenv("REDMINE_EASY_DB_URL", "mysql:///db")
+    with pytest.raises(RuntimeError, match="inside the container"):
+        _connection_params()
+
+
 def test_an_unset_dsn_says_what_to_set():
     with pytest.raises(RuntimeError, match="REDMINE_EASY_DB_URL"):
         _connection_params()

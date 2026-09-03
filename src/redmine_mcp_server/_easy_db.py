@@ -82,8 +82,18 @@ def _connection_params() -> Dict[str, Any]:
     database = (parsed.path or "").lstrip("/")
     if not database:
         raise RuntimeError("REDMINE_EASY_DB_URL names no database.")
+    if not parsed.hostname:
+        # No silent fallback to localhost: inside a container that is the
+        # container itself, and the resulting "connection refused" reads
+        # like a database outage rather than a malformed URL.
+        raise RuntimeError(
+            "REDMINE_EASY_DB_URL names no host. Note that a containerized "
+            "server reaches neither localhost nor 127.0.0.1 of its host: use "
+            "the database host's name or address as seen from inside the "
+            "container."
+        )
     return {
-        "host": parsed.hostname or "127.0.0.1",
+        "host": parsed.hostname,
         "port": parsed.port or 3306,
         "user": unquote(parsed.username or ""),
         "password": unquote(parsed.password or ""),
