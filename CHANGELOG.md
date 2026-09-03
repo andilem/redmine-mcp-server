@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#255](https://github.com/jztan/redmine-mcp-server/issues/255))
 
 ### Fixed
+- Text files are now read and written with an explicit `encoding="utf-8"` in
+  `scripts/release.py` and in the attachment metadata I/O. Without it Python
+  picks the locale codec, so on a Windows machine with a cp1252 locale
+  `scripts/release.py --sync-contributors` died on `README.md`: the emoji
+  variation selector `U+FE0F` encodes as `EF B8 8F`, and `0x8F` is unmapped
+  in cp1252. Two `test_release_script.py` cases failed for the same reason.
 - `get_redmine_attachment` no longer hardcodes `http://` in the download
   `uri` and no longer appends default ports. The scheme now honors a new
   `PUBLIC_SCHEME` env var, or is derived (`https` when `PUBLIC_PORT=443`),
@@ -29,8 +35,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployments behind a TLS-terminating reverse proxy get a usable URL
   without config changes.
   ([#252](https://github.com/jztan/redmine-mcp-server/issues/252))
+- `test_cert_path_symlink_resolution` now skips instead of erroring where
+  symlinks cannot be created. Creating one on Windows needs
+  `SeCreateSymbolicLinkPrivilege`, which an ordinary account does not hold
+  outside Developer Mode or an elevated shell, so the test failed in its
+  setup for every Windows contributor running the suite locally. Guarded the
+  same way as `test_resolve_local_file_rejects_symlink_escape`, the suite's
+  other symlink test.
+- The two MCP Apps UI resources (`ui://redmine/triage-board.html`,
+  `ui://redmine/project-dashboard.html`) now declare their Content Security
+  Policy in `_meta.ui` on both `resources/list` and `resources/read`, with
+  explicit empty `connectDomains` and `resourceDomains` since the views load
+  nothing external. Hosts read the CSP from the resource, not the tool, so
+  ChatGPT's inspector reported "Widget CSP is not set" for both templates.
+  The tool-side metadata now carries the same explicit lists. `domain` is
+  deliberately left unset: its format is host-specific (Claude and ChatGPT
+  differ), and the MCP Apps spec falls back to the host's own sandbox origin
+  when it is omitted.
+  ([#249](https://github.com/jztan/redmine-mcp-server/issues/249))
 
 ### Contributors
+- @aadnehovda reported the missing widget CSP metadata with the ChatGPT
+  inspector screenshot ([#204](https://github.com/jztan/redmine-mcp-server/issues/204))
 - @andilem reported the TLS download URI bug with a precise diagnosis and
   fix proposal ([#252](https://github.com/jztan/redmine-mcp-server/issues/252))
 - @andilem proposed and implemented the tool allow list
