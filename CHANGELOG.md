@@ -8,6 +8,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Issue serializers pass through top-level keys the standard Redmine API does
+  not define, under `unmapped_fields`. Distributions and plugins add their own
+  keys to the issue JSON (Easy Redmine sends `easy_sprint` and
+  `easy_story_points`, for example); a serializer built from a fixed key set
+  dropped them. The values are read from python-redmine's decoded payload,
+  without a lazy fetch. Nulls are dropped, strings are wrapped against prompt
+  injection like any other user-authored text, and a value over 1000 characters
+  once wrapped and serialized is skipped -- the cap is measured after wrapping
+  because that is what reaches the client. `get_redmine_issue`,
+  `list_redmine_issues` and `search_redmine_issues` expose the key; it is
+  omitted when there is nothing to report, so payloads from a stock Redmine are
+  unchanged.
+- `total_estimated_hours` and `total_spent_hours` on the issue serializers.
+  Both are stock Redmine fields carrying the subtask rollup that
+  `estimated_hours` and `spent_hours` leave out.
+
+### Changed
+- Upgraded to FastMCP 4 and the MCP Python SDK v2: `fastmcp>=4.0.1,<5` (locked
+  on 4.0.3) pulls in `mcp` 2.1.1 and the new `mcp-types` package
+  ([#258](https://github.com/jztan/redmine-mcp-server/issues/258)). The
+  migration is mechanical: `ToolAnnotations` are built with the snake_case
+  field names the SDK now uses (`read_only_hint`, `destructive_hint`,
+  `idempotent_hint`; the camelCase wire format is unchanged) and `ToolResult`
+  is imported from its public `fastmcp.tools` path. The `mcp>=1.28.1`
+  constraint added for CVE-2026-52870, CVE-2026-52869 and CVE-2026-59950 is
+  removed because FastMCP 4 already requires `mcp>=2.0.0`, past every
+  affected range. Verified on both sandbox Redmine versions (6.1.1 and 7.0.0)
+  and with live `oauth`, `oauth-proxy`, `legacy` runs plus a docker-compose
+  build; no behaviour change for users.
+
+### Fixed
+- `oauth-proxy` state now survives a container rebuild. `FASTMCP_HOME` was
+  unset by default, so FastMCP resolved its store to the running user's
+  platform data directory, which in the image is inside the container
+  filesystem: every `docker compose up -d --build` discarded the client
+  registrations and upstream token mappings, and every MCP client had to
+  reauthorize. Nothing errored, which made it hard to trace back to the
+  deploy. The image now sets `FASTMCP_HOME=/app/data/fastmcp`, the directory
+  compose already mounts, so a bare `docker run` inherits the right default
+  too. In `oauth-proxy` mode the server also logs the resolved state
+  directory at startup and warns when `FASTMCP_HOME` is unset, and
+  [`docs/oauth-setup.md`](docs/oauth-setup.md) documents the volume
+  requirement, the uid 1000 ownership rules for bind mounts and named
+  volumes, and that changing `REDMINE_MCP_JWT_SIGNING_KEY` orphans the store
+  just as losing the volume does.
+  ([#266](https://github.com/jztan/redmine-mcp-server/issues/266))
+- Contributor credits are no longer dropped from generated GitHub release
+  notes. `_split_contributors` in `scripts/release.py` removed the
+  `### Contributors` section from the body and then rebuilt it from a regex
+  that required a separator right after the handle, so the current prose style
+  (`- @andilem proposed and implemented ...`) matched nothing and the credits
+  were deleted rather than merely skipped. v2.14.0 shipped with no Contributors
+  block at all for that reason. Two related losses are fixed with it: a
+  contributor credited by name rather than by `@handle` no longer disappears
+  (v2.13.0 dropped RedmineUP), and wrapped entries keep their continuation
+  lines, so credits stop being truncated at the first line and losing the PR
+  links the format requires. A `### Contributors` section that parses to
+  nothing now fails the release instead of publishing without credit, since
+  this class of bug has now shipped three times.
+
+### Contributors
+- @gino8080 reported that the issue serializers drop the top-level keys
+  distributions and plugins add
+  ([#263](https://github.com/jztan/redmine-mcp-server/issues/263)) and
+  implemented the `unmapped_fields` pass-through with the `total_estimated_hours`
+  and `total_spent_hours` mappings, verified against Easy Redmine 11plus.5.1
+  ([#268](https://github.com/jztan/redmine-mcp-server/pull/268))
+
+## [2.14.0] - 2026-09-05
+### Added
 - `REDMINE_MCP_ALLOW_TOOLS` (and `REDMINE_MCP_ALLOW_TOOLS_FILE`) expose only
   the named tools; everything else is hidden from `tools/list` and refused by
   `call_tool` with a `TOOL_NOT_ALLOWED` envelope. Enforced by middleware, so
@@ -57,10 +127,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Contributors
 - @aadnehovda reported the missing widget CSP metadata with the ChatGPT
   inspector screenshot ([#204](https://github.com/jztan/redmine-mcp-server/issues/204))
-- @andilem reported the TLS download URI bug with a precise diagnosis and
-  fix proposal ([#252](https://github.com/jztan/redmine-mcp-server/issues/252))
 - @andilem proposed and implemented the tool allow list
-  ([#255](https://github.com/jztan/redmine-mcp-server/issues/255))
+  ([#255](https://github.com/jztan/redmine-mcp-server/issues/255)), fixed the
+  locale-codec text I/O that broke `scripts/release.py --sync-contributors` on
+  a cp1252 Windows machine
+  ([#257](https://github.com/jztan/redmine-mcp-server/pull/257)), made the cert
+  symlink test skip where creating a symlink needs a privilege
+  ([#260](https://github.com/jztan/redmine-mcp-server/pull/260)), and reported
+  the TLS download URI bug with a precise diagnosis and fix proposal
+  ([#252](https://github.com/jztan/redmine-mcp-server/issues/252))
 
 ## [2.13.0] - 2026-08-29
 ### Added
@@ -1621,6 +1696,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive authentication support (username/password and API key)
 - Docker containerization support
 
+[2.14.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.14.0
 [2.13.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.13.0
 [2.12.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.12.0
 [2.11.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.11.0
