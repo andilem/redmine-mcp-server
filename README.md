@@ -133,7 +133,7 @@ The server runs on `http://localhost:8000` with the MCP endpoint at `/mcp`, heal
 | `REDMINE_MCP_JWT_SIGNING_KEY` | Yes§ | – | Stable signing/encryption key used by FastMCP OAuthProxy tokens and storage |
 | `REDMINE_OAUTH_CLIENT_ID` | No | – | Optional upstream Redmine OAuth client ID for `oauth-proxy`; defaults to `REDMINE_INTROSPECT_CLIENT_ID` |
 | `REDMINE_OAUTH_CLIENT_SECRET` | No | – | Optional upstream Redmine OAuth client secret for `oauth-proxy`; defaults to `REDMINE_INTROSPECT_CLIENT_SECRET` |
-| `FASTMCP_HOME` | No | platform default | FastMCP data directory. In `oauth-proxy` mode, encrypted OAuthProxy state is stored below `FASTMCP_HOME/oauth-proxy/` |
+| `FASTMCP_HOME` | No | platform default (`/app/data/fastmcp` in Docker) | FastMCP data directory. In `oauth-proxy` mode, encrypted OAuthProxy state is stored below `FASTMCP_HOME/oauth-proxy/`, and must be on a persistent volume to survive a container rebuild |
 | `REDMINE_MCP_ALLOWED_CLIENT_REDIRECT_URIS` | No | loopback only | `oauth-proxy` client redirect-URI allowlist (glob patterns, comma/space separated). Unset = `http://localhost:*` and `http://127.0.0.1:*`; `*` = allow any |
 | `HEALTH_INTROSPECTION_TTL_SECONDS` | No | `30` | TTL (seconds) for the `/health` Doorkeeper introspection probe cache. Set to `0` to disable caching. |
 | `SERVER_HOST` | No | `0.0.0.0` | Host/IP the MCP server binds to |
@@ -792,7 +792,7 @@ Contributions are welcome! Please see our [contributing guide](./docs/contributi
 Thank you to everyone who has helped improve this project through code, reviews, testing, and feature requests:
 
 <!-- contributors:start -->
-[@sebastianelsner](https://github.com/sebastianelsner) · [@mihajlovicjj](https://github.com/mihajlovicjj) · [@timcomport](https://github.com/timcomport) · [@aadnehovda](https://github.com/aadnehovda) · [@Vitexus](https://github.com/Vitexus) · [@Bricklou](https://github.com/Bricklou) · [@martindglaser](https://github.com/martindglaser) · [@LaurensRietveld](https://github.com/LaurensRietveld) · [@pdostal](https://github.com/pdostal) · [@stevehollis-orderflow](https://github.com/stevehollis-orderflow) · [@knasiotis](https://github.com/knasiotis) · [@azelcs](https://github.com/azelcs) · [@fionnb](https://github.com/fionnb) · [@goizper](https://github.com/goizper) · [@mmahmed](https://github.com/mmahmed) · [@andilem](https://github.com/andilem)
+[@sebastianelsner](https://github.com/sebastianelsner) · [@mihajlovicjj](https://github.com/mihajlovicjj) · [@timcomport](https://github.com/timcomport) · [@aadnehovda](https://github.com/aadnehovda) · [@Vitexus](https://github.com/Vitexus) · [@Bricklou](https://github.com/Bricklou) · [@martindglaser](https://github.com/martindglaser) · [@LaurensRietveld](https://github.com/LaurensRietveld) · [@pdostal](https://github.com/pdostal) · [@stevehollis-orderflow](https://github.com/stevehollis-orderflow) · [@knasiotis](https://github.com/knasiotis) · [@azelcs](https://github.com/azelcs) · [@fionnb](https://github.com/fionnb) · [@goizper](https://github.com/goizper) · [@mmahmed](https://github.com/mmahmed) · [@andilem](https://github.com/andilem) · [@gino8080](https://github.com/gino8080)
 <!-- contributors:end -->
 
 <a href="https://github.com/jztan/redmine-mcp-server/graphs/contributors">

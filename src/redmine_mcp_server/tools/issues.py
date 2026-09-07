@@ -13,6 +13,7 @@ from redminelib.exceptions import (
     ResourceNotFoundError,
     ValidationError,
 )
+from redminelib.resources import Issue
 
 from .._cleanup import _ensure_cleanup_started
 from .._client import _get_redmine_client, logger
@@ -469,6 +470,14 @@ def _easy_sprint_to_dict(raw: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+# Easy Redmine's top-level issue keys that `_easy_issue_fields` serializes
+# itself. Named once because `_issue_unmapped_fields` has to skip exactly
+# these when the flag is on, or they would be reported twice.
+_EASY_ISSUE_FIELD_NAMES = frozenset(
+    {"easy_sprint", "easy_sprint_phase", "easy_sprint_position", "easy_story_points"}
+)
+
+
 def _easy_issue_fields(issue: Any) -> Dict[str, Any]:
     """Easy Redmine's issue attributes, or ``{}`` when the flag is off.
 
@@ -481,9 +490,152 @@ def _easy_issue_fields(issue: Any) -> Dict[str, Any]:
     fields: Dict[str, Any] = {
         "easy_sprint": _easy_sprint_to_dict(getattr(issue, "easy_sprint", None))
     }
-    for name in ("easy_sprint_phase", "easy_sprint_position", "easy_story_points"):
+    for name in sorted(_EASY_ISSUE_FIELD_NAMES - {"easy_sprint"}):
         fields[name] = getattr(issue, name, None)
     return fields
+
+
+# Top-level keys of an issue payload that `_issue_to_dict` serializes itself.
+# Anything else Redmine sends at the top level is passed through under
+# `unmapped_fields`.
+_ISSUE_MAPPED_KEYS = frozenset(
+    {
+        "id",
+        "subject",
+        "description",
+        "project",
+        "status",
+        "priority",
+        "tracker",
+        "author",
+        "assigned_to",
+        "category",
+        "fixed_version",
+        "parent",
+        "start_date",
+        "due_date",
+        "done_ratio",
+        "estimated_hours",
+        "spent_hours",
+        "total_estimated_hours",
+        "total_spent_hours",
+        "is_private",
+        "closed_on",
+        "created_on",
+        "updated_on",
+        "custom_fields",
+    }
+)
+
+# python-redmine pre-seeds every include and relation name to None on the
+# resource, so they sit in `raw()` on a stock Redmine whether or not they were
+# requested. Read off the class rather than hand-written, so the list cannot
+# drift: it also keeps a whole `include=journals` payload out of
+# `unmapped_fields`, where it would sidestep the journal pagination in
+# `get_redmine_issue`.
+# Keys the search endpoint puts on its own result rows. `_hydrate_search_results`
+# returns those sparse rows unchanged when the hydrating fetch fails, and their
+# `raw()` still carries these three -- stock Redmine fields that would otherwise
+# be reported as plugin additions.
+_SEARCH_RESULT_KEYS = frozenset({"title", "url", "datetime"})
+
+_ISSUE_PAYLOAD_SKIP_KEYS = frozenset(
+    _ISSUE_MAPPED_KEYS
+    | _SEARCH_RESULT_KEYS
+    | set(Issue._includes)
+    | set(Issue._relations)
+)
+
+# Cap on the serialized length of a single passed-through value, measured
+# *after* the boundary tags are added, since that is what reaches the client:
+# every string wrapped costs another ~75 characters, so a value that fits the
+# cap raw can be several times the cap once nested leaves are wrapped. Plugins
+# hang rendering junk off the issue (Easy Redmine's `css_classes`, for one)
+# that is long and of no use to a model. Size is the honest filter here; a
+# per-plugin name list only covers the plugins we happen to have seen.
+_UNMAPPED_VALUE_MAX_CHARS = 1000
+
+
+def _serialized_length(value: Any) -> int:
+    """Length of a value once serialized, used for the pass-through cap."""
+    try:
+        return len(json.dumps(value, default=str))
+    except Exception:
+        return len(str(value))
+
+
+def _wrap_nested_insecure_content(value: Any) -> Any:
+    """Wrap every string inside a passed-through value, nested ones included.
+
+    Plugin free text is user-authored the same way `description` and journal
+    notes are, so it gets the same boundary tags. Dict keys are field names,
+    not content, and are left alone.
+    """
+    if isinstance(value, str):
+        return wrap_insecure_content(value)
+    if isinstance(value, dict):
+        return {key: _wrap_nested_insecure_content(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_wrap_nested_insecure_content(item) for item in value]
+    return value
+
+
+def _issue_unmapped_fields(issue: Any) -> Dict[str, Any]:
+    """Collect top-level issue fields this serializer does not otherwise emit.
+
+    Redmine distributions and plugins add their own top-level keys to the
+    issue JSON (Easy Redmine sends ``easy_sprint`` and ``easy_story_points``,
+    for example). python-redmine keeps them in the decoded payload, but a
+    serializer built from a fixed key set drops them. This reads the payload
+    through ``raw()`` -- never ``getattr`` -- so an unknown key can neither
+    trigger a lazy fetch nor be mangled by resource encoding.
+
+    ``None`` values are dropped: on a stock Redmine every include and relation
+    name is present and null, and a null says nothing a caller can use.
+
+    Args:
+        issue: The python-redmine Issue object (or any object exposing
+            ``raw()`` as a dict; anything else yields an empty dict).
+
+    Returns:
+        Dict of the top-level keys absent from ``_ISSUE_PAYLOAD_SKIP_KEYS``,
+        with their strings wrapped against prompt injection and any value
+        dropped that is oversized once wrapped. Empty when there are none.
+    """
+    raw = getattr(issue, "raw", None)
+    if not callable(raw):
+        return {}
+    try:
+        payload = raw()
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    skip = _ISSUE_PAYLOAD_SKIP_KEYS
+    if _is_tags_enabled():
+        # With the plugin enabled `tags` has its own serializer
+        # (`_issue_tags_to_list`); with it disabled the key is just another
+        # unmapped plugin field.
+        skip = skip | {"tags"}
+    if _is_easy_enabled():
+        # Same reason as `tags`: with the flag on these carry their own
+        # serializer (`_easy_issue_fields`), so passing them through as well
+        # would report them twice. With it off they are ordinary unmapped
+        # plugin fields, which is what this function is for.
+        skip = skip | _EASY_ISSUE_FIELD_NAMES
+
+    unmapped: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or key in skip:
+            continue
+        if value is None:
+            continue
+        wrapped = _wrap_nested_insecure_content(value)
+        if _serialized_length(wrapped) > _UNMAPPED_VALUE_MAX_CHARS:
+            continue
+        unmapped[key] = wrapped
+    return unmapped
 
 
 def _issue_to_dict(
@@ -491,7 +643,12 @@ def _issue_to_dict(
     include_custom_fields: bool = False,
     include_relations: bool = False,
 ) -> Dict[str, Any]:
-    """Convert a python-redmine Issue object to a serializable dict."""
+    """Convert a python-redmine Issue object to a serializable dict.
+
+    Top-level keys the standard Redmine API does not define (added by a
+    distribution or plugin) are passed through under ``unmapped_fields``; the key
+    is present only when there is at least one such field.
+    """
     # Use getattr for all potentially missing attributes (search API may not return all)
     assigned = getattr(issue, "assigned_to", None)
     project = getattr(issue, "project", None)
@@ -547,6 +704,10 @@ def _issue_to_dict(
         "done_ratio": getattr(issue, "done_ratio", None),
         "estimated_hours": getattr(issue, "estimated_hours", None),
         "spent_hours": getattr(issue, "spent_hours", None),
+        # Stock Redmine 3.x+ sends both on the issue; they carry the subtask
+        # rollup the two fields above leave out.
+        "total_estimated_hours": getattr(issue, "total_estimated_hours", None),
+        "total_spent_hours": getattr(issue, "total_spent_hours", None),
         "is_private": getattr(issue, "is_private", None),
         "closed_on": _safe_isoformat(getattr(issue, "closed_on", None)),
         "created_on": _safe_isoformat(getattr(issue, "created_on", None)),
@@ -559,6 +720,10 @@ def _issue_to_dict(
         issue_dict["custom_fields"] = _custom_fields_to_list(issue)
     if include_relations:
         issue_dict["relations"] = _issue_relations_to_list(issue)
+
+    unmapped = _issue_unmapped_fields(issue)
+    if unmapped:
+        issue_dict["unmapped_fields"] = unmapped
 
     return issue_dict
 
@@ -601,6 +766,9 @@ def _issue_to_dict_selective(
         - done_ratio: Completion percentage (int, or None)
         - estimated_hours: Estimated effort in hours (float, or None)
         - spent_hours: Logged effort in hours (float, or None)
+        - total_estimated_hours: Estimated effort including subtasks (float,
+          or None)
+        - total_spent_hours: Logged effort including subtasks (float, or None)
         - is_private: Whether the issue is private (bool, or None)
         - closed_on: Closure timestamp (ISO format, or None)
         - created_on: Creation timestamp (ISO format)
@@ -609,6 +777,10 @@ def _issue_to_dict_selective(
         - relations: Issue relations (list of
           {id, issue_id, issue_to_id, relation_type, delay}); needs
           ``include=relations`` on the request that fetched the issue
+        - unmapped_fields: Top-level keys the standard Redmine API does not
+          define (added by a distribution or plugin, e.g. Easy Redmine's
+          ``easy_sprint``), as Redmine sent them. Omitted when there are
+          none, also from the "all fields" result.
 
     Available only when ``REDMINE_EASY_ENABLED=true``; naming one of these on
     a stock Redmine selects nothing:
@@ -697,6 +869,10 @@ def _issue_to_dict_selective(
         "done_ratio": getattr(issue, "done_ratio", None),
         "estimated_hours": getattr(issue, "estimated_hours", None),
         "spent_hours": getattr(issue, "spent_hours", None),
+        # Stock Redmine 3.x+ sends both on the issue; they carry the subtask
+        # rollup the two fields above leave out.
+        "total_estimated_hours": getattr(issue, "total_estimated_hours", None),
+        "total_spent_hours": getattr(issue, "total_spent_hours", None),
         "is_private": getattr(issue, "is_private", None),
         "closed_on": _safe_isoformat(getattr(issue, "closed_on", None)),
         "created_on": _safe_isoformat(getattr(issue, "created_on", None)),
@@ -723,6 +899,10 @@ def _issue_to_dict_selective(
         # this serializer and never requests it, so honouring the name alone
         # there would return a permanently empty key.
         all_fields["relations"] = _issue_relations_to_list(issue)
+    if "unmapped_fields" in keys:
+        unmapped = _issue_unmapped_fields(issue)
+        if unmapped:
+            all_fields["unmapped_fields"] = unmapped
 
     # Return only requested fields (silently skip invalid field names)
     return {key: all_fields[key] for key in keys if key in all_fields}
@@ -940,7 +1120,8 @@ async def get_redmine_issue(
         A dictionary containing issue details, including the standard fields
         ``category``, ``fixed_version`` (target version), ``parent``,
         ``start_date``, ``due_date``, ``done_ratio``, ``estimated_hours``,
-        ``spent_hours``, ``is_private`` and ``closed_on`` (each ``None`` when
+        ``spent_hours``, ``total_estimated_hours``, ``total_spent_hours``,
+        ``is_private`` and ``closed_on`` (each ``None`` when
         not set on the issue). If ``include_journals`` is ``True``
         and the issue has journals, they will be returned under the ``"journals"``
         key. If ``include_attachments`` is ``True`` and attachments exist they
@@ -1106,8 +1287,9 @@ async def list_redmine_issues(
             Available: id, subject, description, project, status, priority,
             tracker, author, assigned_to, category, fixed_version, parent,
             start_date, due_date, done_ratio, estimated_hours, spent_hours,
-            is_private, closed_on, created_on, updated_on, custom_fields,
-            relations. Naming ``custom_fields`` or ``relations`` here has the
+            total_estimated_hours, total_spent_hours, is_private, closed_on,
+            created_on, updated_on, custom_fields, relations,
+            unmapped_fields. Naming ``custom_fields`` or ``relations`` here has the
             same effect as the matching flag, including asking Redmine for the
             relations include. ``["*"]`` or ``["all"]``, on their own, select
             every field except those two, which need their flag -- naming one
