@@ -1,0 +1,439 @@
+"""News tools: reading, writing, and the two places this API misleads.
+
+Redmine answers a news create with 201 and no body and an update with 204,
+so python-redmine reconstructs the result by re-reading. And the list
+endpoint takes ``project_id`` as a query parameter, which Redmine answers
+with the unnarrowed collection if it ever stops reading it. Both are places
+where a tool can look successful while being wrong, so both are pinned here.
+"""
+
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+from redminelib.exceptions import ResourceNotFoundError, ResourceSetIndexError
+
+from redmine_mcp_server.tools import news as news_mod
+from redmine_mcp_server.tools.news import (
+    _news_to_dict,
+    delete_redmine_news,
+    get_redmine_news,
+    list_redmine_news,
+)
+
+
+def _news(**extra):
+    """A python-redmine-ish News object."""
+    base = dict(
+        id=7,
+        project=SimpleNamespace(id=1291, name="FTTA Maintenance & Support"),
+        author=SimpleNamespace(id=108, name="Andreas Lemmer"),
+        title="Release 2.4 is out",
+        summary="Ships the new self-registration flow.",
+        description="<p>Rolled out to prod on Saturday.</p>",
+        created_on="2026-09-05T08:00:00Z",
+    )
+    base.update(extra)
+    obj = SimpleNamespace(**base)
+    obj.raw = lambda: dict(base)
+    return obj
+
+
+def _client(**managers):
+    return SimpleNamespace(news=SimpleNamespace(**managers))
+
+
+@pytest.fixture(autouse=True)
+def _writes_allowed(monkeypatch):
+    monkeypatch.delenv("REDMINE_MCP_READ_ONLY", raising=False)
+
+
+# --- serialization ------------------------------------------------------
+
+
+def test_prose_is_wrapped_and_the_title_is_not():
+    """The title is label-shaped, like an issue's subject."""
+    result = _news_to_dict(_news())
+    assert result["title"] == "Release 2.4 is out"
+    assert result["summary"].startswith("<insecure-content-")
+    assert result["description"].startswith("<insecure-content-")
+    assert "self-registration" in result["summary"]
+
+
+def test_refs_are_id_and_name():
+    result = _news_to_dict(_news())
+    assert result["project"] == {"id": 1291, "name": "FTTA Maintenance & Support"}
+    assert result["author"] == {"id": 108, "name": "Andreas Lemmer"}
+
+
+def test_comments_and_attachments_are_absent_unless_present():
+    assert "comments" not in _news_to_dict(_news())
+    assert "attachments" not in _news_to_dict(_news())
+
+
+def test_comment_content_is_wrapped():
+    comment = SimpleNamespace(
+        id=3,
+        author=SimpleNamespace(id=13, name="Andreas Streit"),
+        content="Bitte auch auf INT ausrollen",
+        created_on="2026-09-05T09:00:00Z",
+    )
+    result = _news_to_dict(_news(comments=[comment]))
+    assert len(result["comments"]) == 1
+    assert result["comments"][0]["content"].startswith("<insecure-content-")
+    assert result["comments"][0]["author"] == {"id": 13, "name": "Andreas Streit"}
+
+
+# --- listing ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_listing_serializes_every_item():
+    with patch.object(
+        news_mod,
+        "_get_redmine_client",
+        return_value=_client(filter=lambda **kw: [_news(), _news(id=8)]),
+    ):
+        result = await list_redmine_news()
+    assert [item["id"] for item in result] == [7, 8]
+
+
+@pytest.mark.asyncio
+async def test_the_project_filter_is_forwarded():
+    seen = {}
+
+    def _filter(**kw):
+        seen.update(kw)
+        return [_news()]
+
+    with patch.object(
+        news_mod, "_get_redmine_client", return_value=_client(filter=_filter)
+    ):
+        await list_redmine_news(project_id=1291, limit=5, offset=10)
+    assert seen["project_id"] == 1291
+    assert seen["limit"] == 5
+    assert seen["offset"] == 10
+
+
+@pytest.mark.asyncio
+async def test_an_unnarrowed_collection_is_refused_not_returned():
+    """Redmine answers 200 with everything when it does not read a filter.
+
+    That is indistinguishable from a filter which matched everything, so a
+    result carrying only other projects' news is refused rather than handed
+    over as a plausible superset.
+    """
+    other = _news(id=9, project=SimpleNamespace(id=999, name="Anderes Projekt"))
+    with patch.object(
+        news_mod,
+        "_get_redmine_client",
+        return_value=_client(filter=lambda **kw: [other]),
+    ):
+        result = await list_redmine_news(project_id=1291)
+    assert result["code"] == "PROJECT_FILTER_IGNORED"
+    assert "1291" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_partial_match_is_kept():
+    """A shared or subproject news item is not evidence of a broken filter."""
+    items = [_news(), _news(id=9, project=SimpleNamespace(id=999, name="Anderes"))]
+    with patch.object(
+        news_mod, "_get_redmine_client", return_value=_client(filter=lambda **kw: items)
+    ):
+        result = await list_redmine_news(project_id=1291)
+    assert [item["id"] for item in result] == [7, 9]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_result_is_not_a_broken_filter():
+    with patch.object(
+        news_mod, "_get_redmine_client", return_value=_client(filter=lambda **kw: [])
+    ):
+        assert await list_redmine_news(project_id=1291) == []
+
+
+@pytest.mark.asyncio
+async def test_a_string_project_identifier_works():
+    items = [_news()]
+    with patch.object(
+        news_mod, "_get_redmine_client", return_value=_client(filter=lambda **kw: items)
+    ):
+        result = await list_redmine_news(project_id="FTTA Maintenance & Support")
+    assert [item["id"] for item in result] == [7]
+
+
+# --- reading one --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_requests_both_includes_by_default():
+    seen = {}
+
+    def _get(news_id, **kw):
+        seen["id"] = news_id
+        seen.update(kw)
+        return _news()
+
+    with patch.object(news_mod, "_get_redmine_client", return_value=_client(get=_get)):
+        await get_redmine_news(7)
+    assert seen["id"] == 7
+    assert set(seen["include"].split(",")) == {"comments", "attachments"}
+
+
+@pytest.mark.asyncio
+async def test_get_can_drop_the_includes():
+    seen = {}
+
+    def _get(news_id, **kw):
+        seen.update(kw)
+        return _news()
+
+    with patch.object(news_mod, "_get_redmine_client", return_value=_client(get=_get)):
+        await get_redmine_news(7, include_comments=False, include_attachments=False)
+    assert seen["include"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_missing_item_is_reported_as_missing():
+    def _get(news_id, **kw):
+        raise ResourceNotFoundError
+
+    with patch.object(news_mod, "_get_redmine_client", return_value=_client(get=_get)):
+        result = await get_redmine_news(404)
+    assert result["code"] == "NOT_FOUND"
+    assert result["upstream_status"] == 404
+
+
+@pytest.mark.asyncio
+async def test_a_bad_id_never_reaches_redmine():
+    with patch.object(news_mod, "_get_redmine_client") as client:
+        result = await get_redmine_news(0)
+    assert "positive integer" in result["error"]
+    client.assert_not_called()
+
+
+# --- creating -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_returns_the_item_when_the_read_back_matches():
+    seen = {}
+
+    def _create(**kw):
+        seen.update(kw)
+        return _news(title=kw["title"])
+
+    with patch.object(
+        news_mod, "_get_redmine_client", return_value=_client(create=_create)
+    ):
+        result = await news_mod.manage_redmine_news(
+            action="create",
+            project_id=1291,
+            title="Wartungsfenster Samstag",
+            description="20:00 bis 23:00",
+        )
+    assert result["title"] == "Wartungsfenster Samstag"
+    assert seen["project_id"] == 1291
+
+
+@pytest.mark.asyncio
+async def test_a_read_back_with_a_different_title_is_not_confirmed():
+    """201 carries no body, so python-redmine returns the newest news item.
+
+    Right after a create that is *probably* ours -- but a neighbour's record
+    with a plausible id is worse than saying so.
+    """
+    with patch.object(
+        news_mod,
+        "_get_redmine_client",
+        return_value=_client(create=lambda **kw: _news(title="jemand anderes")),
+    ):
+        result = await news_mod.manage_redmine_news(
+            action="create", project_id=1291, title="Meine Meldung", description="x"
+        )
+    assert result["success"] is True
+    assert result["confirmed"] is False
+    assert result["code"] == "CREATE_UNCONFIRMED"
+    assert result["sent"]["title"] == "Meine Meldung"
+    assert "id" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_back_is_not_a_failed_create():
+    """The 201 already happened; reporting an error would be wrong."""
+
+    def _create(**kw):
+        raise ResourceSetIndexError
+
+    with patch.object(
+        news_mod, "_get_redmine_client", return_value=_client(create=_create)
+    ):
+        result = await news_mod.manage_redmine_news(
+            action="create", project_id=1291, title="T", description="D"
+        )
+    assert result["success"] is True
+    assert result["code"] == "CREATE_UNCONFIRMED"
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_create_names_the_field_redmine_would_have_rejected():
+    for missing, field in (
+        ({"project_id": 1291, "description": "d"}, "title"),
+        ({"project_id": 1291, "title": "t"}, "description"),
+        ({"title": "t", "description": "d"}, "project_id"),
+    ):
+        with patch.object(news_mod, "_get_redmine_client") as client:
+            result = await news_mod.manage_redmine_news(action="create", **missing)
+        assert field in result["error"], field
+        client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_blank_title_is_not_a_title():
+    with patch.object(news_mod, "_get_redmine_client") as client:
+        result = await news_mod.manage_redmine_news(
+            action="create", project_id=1291, title="   ", description="d"
+        )
+    assert "title" in result["error"]
+    client.assert_not_called()
+
+
+# --- updating -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_sends_only_what_was_given_and_reads_back():
+    seen = {}
+
+    def _update(news_id, **kw):
+        seen["id"] = news_id
+        seen.update(kw)
+        return True
+
+    client = _client(update=_update, get=lambda news_id, **kw: _news(title="neu"))
+    with patch.object(news_mod, "_get_redmine_client", return_value=client):
+        result = await news_mod.manage_redmine_news(
+            action="update", news_id=7, title="neu"
+        )
+    assert seen == {"id": 7, "title": "neu"}
+    assert result["title"] == "neu"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_summary_clears_it_rather_than_being_dropped():
+    seen = {}
+
+    def _update(news_id, **kw):
+        seen.update(kw)
+        return True
+
+    client = _client(update=_update, get=lambda news_id, **kw: _news())
+    with patch.object(news_mod, "_get_redmine_client", return_value=client):
+        await news_mod.manage_redmine_news(action="update", news_id=7, summary="")
+    assert seen == {"summary": ""}
+
+
+@pytest.mark.asyncio
+async def test_an_update_with_nothing_to_change_is_refused():
+    with patch.object(news_mod, "_get_redmine_client") as client:
+        result = await news_mod.manage_redmine_news(action="update", news_id=7)
+    assert "Nothing to update" in result["error"]
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_update_still_reports_success():
+    def _get(news_id, **kw):
+        raise Exception("gone in the meantime")
+
+    client = _client(update=lambda news_id, **kw: True, get=_get)
+    with patch.object(news_mod, "_get_redmine_client", return_value=client):
+        result = await news_mod.manage_redmine_news(
+            action="update", news_id=7, title="neu"
+        )
+    assert result["success"] is True
+    assert result["code"] == "UPDATE_UNCONFIRMED"
+    assert result["updated_fields"] == ["title"]
+
+
+# --- read-only mode -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_writes_are_blocked_in_read_only_mode(monkeypatch):
+    monkeypatch.setenv("REDMINE_MCP_READ_ONLY", "true")
+    with patch.object(news_mod, "_get_redmine_client") as client:
+        created = await news_mod.manage_redmine_news(
+            action="create", project_id=1291, title="t", description="d"
+        )
+        updated = await news_mod.manage_redmine_news(
+            action="update", news_id=7, title="t"
+        )
+        deleted = await delete_redmine_news(news_id=7, confirm_delete=True)
+    for result in (created, updated, deleted):
+        assert "error" in result
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reads_still_work_in_read_only_mode(monkeypatch):
+    monkeypatch.setenv("REDMINE_MCP_READ_ONLY", "true")
+    with patch.object(
+        news_mod,
+        "_get_redmine_client",
+        return_value=_client(get=lambda n, **kw: _news()),
+    ):
+        assert (await get_redmine_news(7))["id"] == 7
+
+
+# --- deleting -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_without_confirmation_and_previews_the_loss():
+    comment = SimpleNamespace(id=1, author=None, content="c", created_on=None)
+    client = _client(get=lambda n, **kw: _news(comments=[comment], attachments=[]))
+    with patch.object(news_mod, "_get_redmine_client", return_value=client):
+        result = await delete_redmine_news(news_id=7)
+    assert result["code"] == "CONFIRMATION_REQUIRED"
+    assert result["impact"]["title"] == "Release 2.4 is out"
+    assert result["impact"]["comments"] == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_does_not_call_redmine_without_confirmation():
+    deleted = []
+    client = _client(
+        get=lambda n, **kw: _news(), delete=lambda n: deleted.append(n) or True
+    )
+    with patch.object(news_mod, "_get_redmine_client", return_value=client):
+        await delete_redmine_news(news_id=7)
+    assert deleted == []
+
+
+@pytest.mark.asyncio
+async def test_delete_with_confirmation_reports_what_went_with_it():
+    comment = SimpleNamespace(id=1, author=None, content="c", created_on=None)
+    deleted = []
+    client = _client(
+        get=lambda n, **kw: _news(comments=[comment]),
+        delete=lambda n: deleted.append(n) or True,
+    )
+    with patch.object(news_mod, "_get_redmine_client", return_value=client):
+        result = await delete_redmine_news(news_id=7, confirm_delete=True)
+    assert deleted == [7]
+    assert result["success"] is True
+    assert result["deleted_news_id"] == 7
+    assert result["cascade_deleted"]["comments"] == 1
+
+
+@pytest.mark.asyncio
+async def test_deleting_something_absent_says_so():
+    def _get(news_id, **kw):
+        raise ResourceNotFoundError
+
+    with patch.object(news_mod, "_get_redmine_client", return_value=_client(get=_get)):
+        result = await delete_redmine_news(news_id=404, confirm_delete=True)
+    assert result["code"] == "NOT_FOUND"

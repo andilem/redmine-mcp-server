@@ -2218,6 +2218,108 @@ manage_redmine_wiki_page(
 
 ---
 
+## News
+
+Project announcements: release notes, maintenance windows, rollout notices.
+Reading has been in the REST API since Redmine 1.1; creating, updating and
+deleting arrived in 5.1, so `manage_redmine_news` and `delete_redmine_news`
+answer with an error on an older server rather than appearing to work.
+
+Two properties of this API are worth knowing, because both are places where
+a call can look successful while being wrong:
+
+- **The list endpoint is effectively flat.** There is a nested
+  `/projects/:id/news.json`, but python-redmine's `News` declares
+  `query_filter = '/news.json'` with no placeholder, so `project_id` travels
+  as a query parameter. Redmine reads it -- but a filter Redmine does *not*
+  read is answered with 200 and the collection unnarrowed, which a caller
+  cannot tell apart from a filter that matched everything. So
+  `list_redmine_news` checks the result against what was asked for and
+  refuses with `PROJECT_FILTER_IGNORED` rather than handing over a plausible
+  superset.
+- **Writes come back without a body.** Redmine answers a create with 201 and
+  an update with 204. python-redmine compensates on create by re-reading
+  `news.filter(**params)[0]`, i.e. the newest visible news item -- probably,
+  but not certainly, the one just created. The read-back is verified against
+  the title that was sent; when it cannot be confirmed the tool returns
+  `confirmed: false` with a `CREATE_UNCONFIRMED` code and the values it sent,
+  instead of a neighbour's record with a plausible id.
+
+### list_redmine_news
+
+Lists news, newest first, across every visible project or narrowed to one.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_id` | int \| str \| null | `null` | Restrict to one project (numeric id or identifier) |
+| `limit` | int | `25` | Maximum items, 1-100 |
+| `offset` | int | `0` | Items to skip |
+
+Returns a list of `{id, project, author, title, summary, description,
+created_on}`. Comments and attachments are not included -- the list endpoint
+does not serve them; use `get_redmine_news` for one item's full context.
+
+Requires the `view_news` permission.
+
+### get_redmine_news
+
+Reads one news item together with its discussion.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `news_id` | int | required | The news item |
+| `include_comments` | bool | `true` | Include the comment thread |
+| `include_attachments` | bool | `true` | Include attachment metadata |
+
+Both includes default to on: a news item without its comments is usually
+just three fields, and the discussion is where the follow-up lives. `comments`
+and `attachments` appear only when requested *and* non-empty. An unknown id
+returns `code: NOT_FOUND`.
+
+Requires the `view_news` permission.
+
+### manage_redmine_news
+
+Creates or updates a news item. Needs Redmine 5.1 or newer.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `action` | `"create"` \| `"update"` | required |
+| `project_id` | int \| str | Required for `create`; news cannot move between projects, so `update` ignores it |
+| `news_id` | int | Required for `update` |
+| `title` | str | Required for `create`, optional for `update` (cannot be blank) |
+| `summary` | str | One-line teaser. Optional; an empty string clears it on `update` |
+| `description` | str | The body. Required for `create`, optional for `update` (cannot be blank) |
+
+Redmine validates the presence of both `title` and `description`, so a
+create missing either is refused here with the field named, rather than
+passed on for a 422.
+
+Requires the `manage_news` permission -- Redmine has no finer split for
+news, so create and update carry the same one. Blocked in read-only mode.
+
+### delete_redmine_news
+
+Hard-deletes a news item, and its comments and attachments with it.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `news_id` | int | required | The news item |
+| `confirm_delete` | bool | `false` | Must be `true` to actually delete |
+
+Without `confirm_delete` the tool refuses and returns
+`code: CONFIRMATION_REQUIRED` with an `impact` preview naming the title and
+counting the comments and attachments that would go with it. This mirrors
+`delete_redmine_issue` and `delete_file`.
+
+Being its own tool rather than an action of `manage_redmine_news` is
+deliberate: a deployment restricting the exposed tools (see
+[Tool Allow List](#tool-allow-list)) can then offer announcements without
+offering their destruction, which the actions inside a `manage_X` tool
+cannot express.
+
+Requires the `manage_news` permission. Blocked in read-only mode.
+
 ## File Operations
 
 ### `list_files`
