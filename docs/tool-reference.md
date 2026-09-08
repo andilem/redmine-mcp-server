@@ -326,7 +326,14 @@ reason it is scoped as narrowly as it is:
   authorization entirely, so `list_easy_sprints` re-establishes it: every
   sprint's project is fetched with the *caller's* API key, and a sprint in a
   project the caller cannot open is dropped from the result. Sprints with no
-  project, and cross-project ones, are treated as global.
+  project, and cross-project ones, are treated as global: a team's sprint
+  usually lives on a parent project the people working in the subproject are
+  not members of, and Easy Redmine offers it in their sprint picker all the
+  same, so it is listed with `project: null` rather than dropped. Because
+  the filtering happens after the read, `limit` and `offset` count sprints
+  in the answer, not rows in the table -- the table is walked a page at a
+  time until the page is full, up to 500 rows, and a `note` says so when
+  that ceiling is what stopped it.
 - **There is no generic SQL tool, and there will not be one.** Only named,
   parameterized queries exist. A "run this SELECT" tool would hand every
   caller `users.hashed_password`, every stored API key and every private

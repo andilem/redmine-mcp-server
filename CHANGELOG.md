@@ -56,9 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `REDMINE_EASY_DB_URL` (needs the new `easy` extra for the PyMySQL driver),
   filtered by name, `active_on` date, `closed` and project. Because a
   database read carries no permissions, every sprint's project is re-checked
-  with the caller's own API key and sprints in projects they cannot open are
-  dropped. Only named, parameterized queries exist; there is deliberately no
-  generic SQL entry point.
+  with the caller's own API key and a sprint tied to a project they cannot
+  open is dropped -- except a cross-project one, which applies to their
+  projects regardless and is listed without naming its owner, the way Easy
+  Redmine offers it in every project's sprint picker. Filtering happens after
+  the read, so the table is walked a page at a time until the caller's
+  `limit` is filled rather than filtered down to nothing; only a refusal
+  counts as "not visible", and an expired key is reported instead of being
+  answered as an instance without sprints. Only named, parameterized queries
+  exist; there is deliberately no generic SQL entry point.
   With `unmapped_fields` in place, these four keys are skipped there while
   the flag is on, the way `tags` already is: they have their own serializer
   then, and passing them through as well would report them twice.

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from redminelib.exceptions import AuthError, ForbiddenError
 
 from redmine_mcp_server import _easy_db
 from redmine_mcp_server._easy_db import (
@@ -227,7 +228,7 @@ def _client(visible_ids):
     class Projects:
         def get(self, project_id):
             if project_id not in visible_ids:
-                raise Exception("403 Forbidden")
+                raise ForbiddenError()
             return SimpleNamespace(id=project_id, name=f"Projekt {project_id}")
 
     return SimpleNamespace(project=Projects())
@@ -279,6 +280,89 @@ async def test_a_sprint_in_an_invisible_project_is_dropped(dsn):
         ):
             result = await sprints_mod.list_easy_sprints()
     assert [s["id"] for s in result["sprints"]] == [812]
+
+
+@pytest.mark.asyncio
+async def test_a_cross_project_sprint_survives_an_invisible_owner(dsn):
+    """A team's sprint often sits on a parent project the people working in
+    the subproject are not members of. It applies to them anyway -- Easy
+    Redmine offers it in their sprint picker -- so it is listed, without
+    naming an owner they cannot open."""
+    rows = [_row_to_sprint(_row(project_id=4242, cross_project=1))]
+    with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
+        with patch.object(
+            sprints_mod, "_get_redmine_client", return_value=_client(set())
+        ):
+            result = await sprints_mod.list_easy_sprints()
+    assert [s["id"] for s in result["sprints"]] == [812]
+    assert result["sprints"][0]["project"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_broken_key_is_not_answered_as_no_sprints(dsn):
+    """Only "you may not have this" is an answer. Anything else must not
+    look like an instance without sprints."""
+
+    class Projects:
+        def get(self, project_id):
+            raise AuthError()
+
+    rows = [_row_to_sprint(_row())]
+    with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
+        with patch.object(
+            sprints_mod,
+            "_get_redmine_client",
+            return_value=SimpleNamespace(project=Projects()),
+        ):
+            result = await sprints_mod.list_easy_sprints()
+    assert "error" in result
+    assert "sprints" not in result
+
+
+@pytest.mark.asyncio
+async def test_sprints_behind_an_invisible_page_are_still_reached(dsn):
+    """The window is the answer's, not the table's: a first database page
+    the caller may not see must not come back as an empty result."""
+    hidden = [_row_to_sprint(_row(id=i, project_id=4242)) for i in range(50)]
+    mine = [_row_to_sprint(_row(id=900))]
+
+    def pages(**kwargs):
+        return hidden if kwargs["offset"] == 0 else mine
+
+    with patch.object(sprints_mod, "fetch_sprints", side_effect=pages):
+        with patch.object(
+            sprints_mod, "_get_redmine_client", return_value=_client({1291})
+        ):
+            result = await sprints_mod.list_easy_sprints(limit=5)
+    assert [s["id"] for s in result["sprints"]] == [900]
+
+
+@pytest.mark.asyncio
+async def test_offset_counts_answered_sprints(dsn):
+    rows = [_row_to_sprint(_row(id=i)) for i in (1, 2, 3)]
+    with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
+        with patch.object(
+            sprints_mod, "_get_redmine_client", return_value=_client({1291})
+        ):
+            result = await sprints_mod.list_easy_sprints(limit=1, offset=1)
+    assert [s["id"] for s in result["sprints"]] == [2]
+
+
+@pytest.mark.asyncio
+async def test_the_walk_stops_and_says_so(dsn):
+    """A caller who can see nothing must not walk the whole table."""
+
+    def pages(**kwargs):
+        return [_row_to_sprint(_row(id=i, project_id=4242)) for i in range(50)]
+
+    with patch.object(sprints_mod, "fetch_sprints", side_effect=pages) as fetch:
+        with patch.object(
+            sprints_mod, "_get_redmine_client", return_value=_client(set())
+        ):
+            result = await sprints_mod.list_easy_sprints()
+    assert result["sprints"] == []
+    assert "note" in result
+    assert fetch.call_count == 10
 
 
 @pytest.mark.asyncio

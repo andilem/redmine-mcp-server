@@ -5,7 +5,9 @@ cleanup tool: on a stock Redmine there are no sprints to list.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Tuple
+
+from redminelib.exceptions import ForbiddenError, ResourceNotFoundError
 
 from .._client import _get_redmine_client
 from .._easy_db import fetch_sprints, is_configured
@@ -18,9 +20,17 @@ logger = logging.getLogger(__name__)
 
 _MAX_LIMIT = 100
 
+# Rows are filtered for visibility here rather than in SQL, so the database
+# window and the answer's window are not the same thing. These bound the
+# walk: a page to read at a time, and a ceiling on how deep to go before
+# answering with what was found.
+_PAGE_SIZE = 50
+_MAX_SCAN_ROWS = 500
 
-def _visible_projects(candidates: Set[int]) -> Dict[int, str]:
-    """Which of ``candidates`` the caller's own API key can read.
+
+def _resolve_project(project_id: int, names: Dict[int, Optional[str]]) -> None:
+    """Record the project's name in ``names``, or ``None`` when it is not
+    the caller's to see.
 
     The database read behind this tool bypasses Redmine's authorization, so
     visibility is re-established here, with the caller's key rather than the
@@ -28,18 +38,43 @@ def _visible_projects(candidates: Set[int]) -> Dict[int, str]:
     sprints cluster on a handful of projects, and the alternative -- pulling
     the whole project list -- costs far more on an instance with a thousand
     of them.
+
+    Only "you may not have this" counts as an answer. An expired key or an
+    unreachable Redmine is raised instead, because a silently empty sprint
+    list would send the caller hunting for a missing database connection
+    that is not missing.
     """
-    visible: Dict[int, str] = {}
+    if project_id in names:
+        return
     client = _get_redmine_client()
-    for project_id in candidates:
-        try:
-            project = client.project.get(project_id)
-        except Exception:
-            # Not found, forbidden, archived -- all mean "not this caller's".
-            logger.debug("Project %s not visible to the caller.", project_id)
-            continue
-        visible[project_id] = str(getattr(project, "name", "") or "")
-    return visible
+    try:
+        project = client.project.get(project_id)
+    except (ForbiddenError, ResourceNotFoundError):
+        # Forbidden, gone, archived -- all mean "not this caller's".
+        logger.debug("Project %s not visible to the caller.", project_id)
+        names[project_id] = None
+        return
+    names[project_id] = str(getattr(project, "name", "") or "")
+
+
+def _place(
+    sprint: Dict[str, Any], names: Dict[int, Optional[str]]
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Whether the caller may see ``sprint``, and the project to report for
+    it. Consumes the row's ``project_id``.
+    """
+    project_id = sprint.pop("project_id")
+    if project_id is None:
+        return True, None
+    name = names.get(project_id)
+    if name is not None:
+        return True, {"id": project_id, "name": name}
+    # The owning project is not the caller's. A cross-project sprint applies
+    # to theirs regardless -- Easy Redmine offers it in every project's
+    # sprint picker, and the query keeps it for the same reason -- so it
+    # stays, without naming an owner they cannot open. A sprint tied to one
+    # project alone is not theirs to see.
+    return bool(sprint.get("cross_project")), None
 
 
 async def list_easy_sprints(
@@ -55,8 +90,8 @@ async def list_easy_sprints(
     Easy Redmine exposes no sprint endpoint -- ``/easy_sprints.json`` answers
     403 even with a valid API key -- so this reads the ``easy_sprints`` table
     through the read-only connection in ``REDMINE_EASY_DB_URL``. Results are
-    then filtered to the projects the calling user can actually see, using
-    their own API key, because a database read has no permissions of its own.
+    then filtered to what the calling user may see, using their own API key,
+    because a database read has no permissions of its own.
 
     The ``id`` is what the other two sprint operations need:
 
@@ -76,21 +111,29 @@ async def list_easy_sprints(
         closed: ``False`` (default) for open sprints, ``True`` for closed
             ones, ``None`` for both.
         project_id: Keep sprints belonging to this project, plus the
-            ``cross_project`` and project-less ones, which apply everywhere.
+            cross-project and project-less ones, which apply everywhere.
         limit: Maximum sprints to return (default 25, max 100).
-        offset: Sprints to skip, for paging.
+        offset: Sprints to skip, for paging. It counts answered sprints,
+            not table rows, so a page is never short because rows were
+            filtered out behind it.
 
     Returns:
         ``{"sprints": [...]}`` with each sprint as ``{id, name, start_date,
         due_date, closed, cross_project, capacity, goal, version_id,
-        project}``, where ``project`` is ``{id, name}`` or ``None`` for a
-        global sprint. Newest due date first. On failure, a dict with an
-        ``"error"`` key.
+        project}``, where ``project`` is ``{id, name}`` or ``None``. Newest
+        due date first. On failure, a dict with an ``"error"`` key.
 
     Note:
         Several sprints can be running on the same date -- one per team is
         the normal case -- so a caller resolving "the current sprint" should
         expect a list and say which one it picked.
+
+        ``project`` is ``None`` both for a sprint that belongs to no project
+        and for a cross-project one whose owning project the caller cannot
+        open -- a team's sprint commonly lives on a parent project that the
+        people working in the subproject are not members of. The sprint
+        applies to them all the same, so it is listed; the owner's name is
+        not.
     """
     if not is_configured():
         return {
@@ -113,47 +156,67 @@ async def list_easy_sprints(
         return {"error": "offset must not be negative."}
 
     def _run() -> Dict[str, Any]:
-        try:
-            sprints = fetch_sprints(
-                name=name,
-                active_on=active_on,
-                closed=closed,
-                project_id=project_id,
-                limit=limit,
-                offset=offset,
+        names: Dict[int, Optional[str]] = {}
+        kept: List[Dict[str, Any]] = []
+        wanted = offset + limit
+        scanned = 0
+        truncated = False
+
+        while len(kept) < wanted:
+            if scanned >= _MAX_SCAN_ROWS:
+                truncated = True
+                break
+            try:
+                rows = fetch_sprints(
+                    name=name,
+                    active_on=active_on,
+                    closed=closed,
+                    project_id=project_id,
+                    limit=_PAGE_SIZE,
+                    offset=scanned,
+                )
+            except RuntimeError as exc:
+                # Misconfiguration or a missing driver: the message is the
+                # point.
+                return {"error": str(exc), "code": "EASY_DB_UNAVAILABLE"}
+            except Exception as exc:
+                logger.warning("Sprint query failed: %s", exc)
+                return {
+                    "error": f"Could not read Easy Redmine sprints: {exc}",
+                    "code": "EASY_DB_ERROR",
+                }
+            if not rows:
+                break
+            scanned += len(rows)
+
+            for sprint in rows:
+                if len(kept) >= wanted:
+                    break
+                candidate = sprint.get("project_id")
+                if candidate is not None:
+                    try:
+                        _resolve_project(candidate, names)
+                    except Exception as exc:
+                        return _handle_redmine_error(
+                            exc, "checking project visibility for sprints", {}
+                        )
+                keep, project_ref = _place(sprint, names)
+                if not keep:
+                    continue
+                sprint["project"] = project_ref
+                kept.append(sprint)
+
+            if len(rows) < _PAGE_SIZE:
+                break
+
+        result: Dict[str, Any] = {"sprints": kept[offset : offset + limit]}
+        if truncated:
+            result["note"] = (
+                f"Stopped after reading {scanned} sprints; there may be more "
+                "beyond them. Narrow the search with name, active_on or "
+                "project_id."
             )
-        except RuntimeError as exc:
-            # Misconfiguration or a missing driver: the message is the point.
-            return {"error": str(exc), "code": "EASY_DB_UNAVAILABLE"}
-        except Exception as exc:
-            logger.warning("Sprint query failed: %s", exc)
-            return {
-                "error": f"Could not read Easy Redmine sprints: {exc}",
-                "code": "EASY_DB_ERROR",
-            }
-
-        candidates = {s["project_id"] for s in sprints if s["project_id"] is not None}
-        try:
-            visible = _visible_projects(candidates) if candidates else {}
-        except Exception as exc:
-            return _handle_redmine_error(
-                exc, "checking project visibility for sprints", {}
-            )
-
-        result: List[Dict[str, Any]] = []
-        for sprint in sprints:
-            project_ref = sprint.pop("project_id")
-            if project_ref is None:
-                sprint["project"] = None
-            elif project_ref in visible:
-                sprint["project"] = {"id": project_ref, "name": visible[project_ref]}
-            else:
-                # A sprint in a project the caller cannot open is not theirs
-                # to see, whatever the database says.
-                continue
-            result.append(sprint)
-
-        return {"sprints": result}
+        return result
 
     return await in_thread(_run)
 
