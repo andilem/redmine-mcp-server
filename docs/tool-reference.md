@@ -1126,7 +1126,7 @@ Creates a new issue in the specified project. Blocked when `REDMINE_MCP_READ_ONL
   - Exactly ONE source key:
     - `content_base64` (string): Raw file bytes encoded as base64. `filename` is required when using this source.
     - `source_url` (string): HTTP(S) URL the server fetches. Filename is derived from the URL or `Content-Disposition` if omitted.
-    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted.
+    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem, so it is no use for a file on the caller's machine — over HTTP the two are different hosts, and no value of `REDMINE_MCP_UPLOAD_FILE_ROOTS` can bridge that. Send such a file as `content_base64` or `source_url`, neither of which needs roots configured.
   - `filename` (string, optional): Name the attachment will have in Redmine. Required for `content_base64`; derived for other sources when omitted.
   - `content_type` (string, optional): MIME type override (e.g. `"application/pdf"`).
   - `description` (string, optional): Human-readable description for the attachment.
@@ -1221,7 +1221,7 @@ Updates an existing issue with the provided fields. Blocked when `REDMINE_MCP_RE
   - Exactly ONE source key:
     - `content_base64` (string): Raw file bytes encoded as base64. `filename` is required when using this source.
     - `source_url` (string): HTTP(S) URL the server fetches. Filename is derived from the URL or `Content-Disposition` if omitted.
-    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted.
+    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem, so it is no use for a file on the caller's machine — over HTTP the two are different hosts, and no value of `REDMINE_MCP_UPLOAD_FILE_ROOTS` can bridge that. Send such a file as `content_base64` or `source_url`, neither of which needs roots configured.
   - `filename` (string, optional): Name the attachment will have in Redmine. Required for `content_base64`; derived for other sources when omitted.
   - `content_type` (string, optional): MIME type override (e.g. `"application/pdf"`).
   - `description` (string, optional): Human-readable description for the attachment.
@@ -2125,11 +2125,12 @@ List, get, create, update, delete, or rename a Redmine wiki page. Replaces `list
 - `include_attachments` (boolean, optional): Include attachment metadata in `get` response. Default: `true`
 - `text` (string): Page content. Required for `create`. Required for `update` unless `uploads` is provided, in which case the server reuses the page's current text
 - `comments` (string, optional): Change log comment for `create` and `update`
+- `parent_title` (string, optional): Title of the page this page sits under, for `create` and `update`. Omit it and an existing parent is left untouched; pass a title to file the page under it; pass `""` to move the page back to the wiki root. The parent must already exist in the same project -- Redmine rejects an unknown parent with a 422 that carries no error text, so the tool substitutes a message naming `parent_title` as the likely cause. `rename` keeps the current parent on its own; reparent with `update`
 - `new_title` (string): New title for `rename` (must differ from `wiki_page_title`)
 - `redirect_existing_links` (boolean, optional): When `true` (default), `rename` creates a `WikiRedirect` from the old title to the new title
 - `uploads` (list, optional): Files to attach to the page on `create` and `update`. Requires the `edit_wiki_pages` permission on the project. Maximum 10 items. Each item is an object with:
   - Exactly ONE source key:
-    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted.
+    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem, so it is no use for a file on the caller's machine — over HTTP the two are different hosts, and no value of `REDMINE_MCP_UPLOAD_FILE_ROOTS` can bridge that. Send such a file as `content_base64` or `source_url`, neither of which needs roots configured.
     - `source_url` (string): HTTP(S) URL the server fetches. Filename is derived from the URL or `Content-Disposition` if omitted.
     - `content_base64` (string): Raw file bytes encoded as base64. `filename` is required when using this source. Prefer `file_path` or `source_url` where possible: base64 sends the entire file through the model, while a path or URL costs a few tokens regardless of file size.
   - `filename` (string, optional): Name the attachment will have in Redmine. Required for `content_base64`; derived for other sources when omitted.
@@ -2138,7 +2139,7 @@ List, get, create, update, delete, or rename a Redmine wiki page. Replaces `list
 
 **Returns:**
 - `list`: array of page metadata dicts (`title`, `version`, `parent_title` if present, `created_on`, `updated_on`) — no body text
-- `get`/`create`/`update`: full wiki page dict (`title`, `text`, `version`, `created_on`, `updated_on`, `author`, `project`, `attachments` when applicable). `project` is only returned by Redmine 7.0+; earlier versions omit the key
+- `get`/`create`/`update`: full wiki page dict (`title`, `text`, `version`, `created_on`, `updated_on`, `author`, `project`, `parent_title`, `attachments` when applicable). `project` is only returned by Redmine 7.0+; earlier versions omit the key. `parent_title` is a plain string and is present only when the page has a parent, matching the key `list` already returns; a page at the wiki root omits it
 - `delete`: `{"success": true, "title": ..., "message": ...}`
 - `rename`: `{"success": true, ...}` plus the renamed page's metadata
 - Error: `{"error": "..."}`
@@ -2170,6 +2171,31 @@ manage_redmine_wiki_page(
     wiki_page_title="Getting_Started",
     text="# Getting Started\n\nWelcome to the project!",
     comments="Initial creation",
+)
+
+# Create a page underneath another page
+manage_redmine_wiki_page(
+    action="create",
+    project_id="my-project",
+    wiki_page_title="Examples_REST_API",
+    text="See the parent page for the index.",
+    parent_title="Examples",
+)
+
+# Move an existing page under a parent, then back to the wiki root
+manage_redmine_wiki_page(
+    action="update",
+    project_id="my-project",
+    wiki_page_title="Examples_REST_API",
+    text="See the parent page for the index.",
+    parent_title="Examples",
+)
+manage_redmine_wiki_page(
+    action="update",
+    project_id="my-project",
+    wiki_page_title="Examples_REST_API",
+    text="See the parent page for the index.",
+    parent_title="",
 )
 
 # Update an existing page

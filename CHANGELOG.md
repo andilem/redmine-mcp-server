@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmed. Deleting is a separate tool, like `delete_redmine_issue` and
   `delete_file`, so a restricted deployment can offer announcements without
   offering their destruction.
+- `manage_redmine_wiki_page` exposes the wiki page hierarchy. `get`, `create`
+  and `update` now report `parent_title` (the same key `list` already
+  returned), and `create` and `update` accept it, so pages can be filed under
+  a parent and moved between parents. Omitting the parameter leaves an
+  existing parent untouched and `""` moves a page back to the wiki root, so no
+  existing caller can orphan a page. An unknown parent makes Redmine answer
+  422 with an empty error list on both 6.1 and 7.0; that reasonless failure is
+  replaced with a message naming `parent_title` as the likely cause
+  ([#270](https://github.com/jztan/redmine-mcp-server/issues/270)).
 - Issue serializers pass through top-level keys the standard Redmine API does
   not define, under `unmapped_fields`. Distributions and plugins add their own
   keys to the issue JSON (Easy Redmine sends `easy_sprint` and
@@ -70,6 +79,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then, and passing them through as well would report them twice.
 
 ### Changed
+- `create_redmine_issue` and `update_redmine_issue` document `uploads` in their
+  docstrings, so the parameter reaches the tool schema with the three content
+  sources named rather than as a bare array of objects. `docs/tool-reference.md`
+  described them all along, but a client reads the schema, not the repository:
+  an agent holding a file could not discover that `content_base64` is accepted
+  there, found the documented `file_path` on `upload_file` instead, and hit a
+  wall no configuration can open, because that path is read on the server's
+  filesystem rather than the caller's. The upload-roots error now says so and
+  names `content_base64` and `source_url` as the sources that need no roots at
+  all; `manage_redmine_wiki_page` already documented its own `uploads` this way.
 - Upgraded to FastMCP 4 and the MCP Python SDK v2: `fastmcp>=4.0.1,<5` (locked
   on 4.0.3) pulls in `mcp` 2.1.1 and the new `mcp-types` package
   ([#258](https://github.com/jztan/redmine-mcp-server/issues/258)). The
