@@ -1,28 +1,41 @@
 """News tools: read project announcements, and manage them.
 
 Redmine news are project-level announcements -- a title, a one-line summary,
-a body, and optionally comments and attachments. The REST API has served
-them read-only since Redmine 1.1; ``POST``, ``PUT`` and ``DELETE`` arrived
-in 5.1, so the write tools surface a plain error on an older server rather
-than appearing to work.
+a body, and optionally comments and attachments. Reading has been in the
+REST API since Redmine 1.1; writing arrived in 4.1.
 
 Two shapes of this API need care, and both are handled here rather than
 passed on to the caller:
 
-- **The list endpoint is flat.** There is a nested
-  ``/projects/:id/news.json``, but python-redmine's ``News`` declares
-  ``query_filter = '/news.json'`` with no placeholder, so ``project_id``
-  travels as a query parameter for both ``news.filter(project_id=...)`` and
-  ``project(...).news``. Redmine reads that parameter through
-  ``find_optional_project`` -- but a filter Redmine does *not* read is not an
-  error there, it answers 200 with the collection unnarrowed. So the result
-  is checked against what was asked for.
-- **Create answers 201 with no body.** python-redmine's ``NewsManager``
-  compensates by re-reading ``news.filter(**params)[0]``, i.e. the newest
-  visible news, which is *probably* but not certainly the one just created.
-  The read-back is verified against the title that was sent, and a create
-  whose result cannot be confirmed says so instead of returning a
+- **Writes answer 204 with no body**, create included. python-redmine's
+  ``NewsManager`` compensates on create by re-reading
+  ``news.filter(**self.params)[0]``. Those params carry the ``project_id``
+  that was posted, so the read-back is scoped to the target project rather
+  than to the newest news anywhere: the remaining race is someone else
+  posting to the *same* project in the same instant. Narrow, but not
+  nothing, so the read-back is verified against the title that was sent and
+  a create whose result cannot be confirmed says so instead of returning a
   neighbour's record.
+- **Two failures arrive as plain HTTP codes** that mean something specific
+  here, and both are ambiguous until something is read back.
+  ``News.redmine_version`` is ``(1, 1, 0)`` for the whole resource, so
+  python-redmine raises no version error where the write endpoint is
+  absent: the POST simply 404s, which a caller would read as a missing
+  project. Core Redmine has exposed create, update and delete since 4.1,
+  but distributions vary, so the message names the endpoint rather than a
+  core version. And a 403 is either the project's news module being off --
+  Redmine checks the module before any permission, so an administrator is
+  refused too -- or an
+  ordinary permission denial. The module is read back and only claimed when
+  it really is off, because telling an operator to switch on something that
+  is already on sends them looking in the wrong place. The codes are
+  ``NEWS_WRITE_UNSUPPORTED`` and ``NEWS_MODULE_DISABLED``, and they apply to
+  reads as much as writes.
+
+The list endpoint takes ``project_id`` as a query parameter rather than in
+the path, because python-redmine's ``News.query_filter`` is ``/news.json``
+with no placeholder. Redmine reads it either way, and answers 404 for a
+project that does not exist.
 """
 
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -37,6 +50,7 @@ from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
 from .._offload import offloaded
 from .._serialization import (
     _attachment_to_dict,
+    _enabled_module_names,
     _included_list,
     _named_ref,
     _safe_isoformat,
@@ -90,9 +104,107 @@ def _news_to_dict(news: Any) -> Dict[str, Any]:
     return result
 
 
-def _project_ref_id(item: Dict[str, Any]) -> Any:
-    project = item.get("project") or {}
-    return project.get("id") if isinstance(project, dict) else None
+def _project_ref_of(news: Any) -> Optional[Union[str, int]]:
+    """The project id on an already-fetched news item."""
+    return getattr(getattr(news, "project", None), "id", None)
+
+
+def _news_module_enabled(project_id: Union[str, int]) -> Optional[bool]:
+    """Whether the project has the news module on, or ``None`` if unknowable."""
+    try:
+        project = _get_redmine_client().project.get(
+            project_id, include="enabled_modules"
+        )
+    except Exception:
+        return None
+    return "news" in _enabled_module_names(project)
+
+
+def _project_of_news(news_id: int) -> Optional[Union[str, int]]:
+    """The project a news item belongs to, or ``None`` if it cannot be read."""
+    try:
+        news = _get_redmine_client().news.get(news_id)
+    except Exception:
+        return None
+    project = getattr(news, "project", None)
+    return getattr(project, "id", None)
+
+
+def _classify_news_failure(
+    exc: Exception,
+    *,
+    project_id: Optional[Union[str, int]] = None,
+    news_id: Optional[int] = None,
+    write: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Name the failures that arrive as bare HTTP codes and mislead.
+
+    A 403 has two causes that call for opposite fixes: the project has the
+    news module switched off, or the role simply lacks the permission. Both
+    look identical on the wire, so the module is read back and only claimed
+    when it really is off -- telling an operator to enable something that is
+    already on sends them looking in the wrong place. When the module cannot
+    be read, nothing is claimed.
+
+    A 404 is ambiguous on a write to ``/projects/{id}/news.json``: either the
+    project is gone, or the endpoint is (``News.redmine_version`` is
+    ``(1, 1, 0)`` for the whole resource, so python-redmine raises no version
+    error of its own). If the project still reads back, the endpoint is what
+    is missing. Core Redmine has exposed it since 4.1 and distributions vary,
+    so the message names the endpoint rather than a version. Reads are
+    unaffected -- they work on every version -- so that branch is for writes
+    only.
+
+    Returns ``None`` when the failure is neither, leaving it to the shared
+    error handler.
+    """
+    from redminelib.exceptions import ForbiddenError
+
+    if isinstance(exc, ForbiddenError):
+        target = project_id
+        if target is None and news_id is not None:
+            target = _project_of_news(news_id)
+        if target is None or _news_module_enabled(target) is not False:
+            # Either unknowable, or the module is on and this is an ordinary
+            # permission denial. Both are the shared handler's business.
+            return None
+        return {
+            "error": (
+                "Redmine refused the request because the project has the "
+                "news module switched off."
+            ),
+            "hint": (
+                "Enable it under Project settings > Modules > News. Redmine "
+                "checks the module before permissions, so this is refused "
+                "even for an administrator. get_project_modules shows what a "
+                "project has enabled."
+            ),
+            "code": "NEWS_MODULE_DISABLED",
+            "upstream_status": 403,
+            "project_id": target,
+        }
+
+    if write and isinstance(exc, ResourceNotFoundError) and project_id is not None:
+        try:
+            _get_redmine_client().project.get(project_id)
+        except Exception:
+            return None  # The project is what is missing; let NOT_FOUND stand.
+        return {
+            "error": (
+                "This Redmine does not expose the news write endpoint over "
+                "the REST API."
+            ),
+            "hint": (
+                "The project exists and is readable, so the missing piece is "
+                "the endpoint, not the project. Core Redmine has exposed it "
+                "since 4.1, but distributions vary. Reading news is "
+                "unaffected."
+            ),
+            "code": "NEWS_WRITE_UNSUPPORTED",
+            "upstream_status": 404,
+            "project_id": project_id,
+        }
+    return None
 
 
 @mcp.tool()
@@ -110,16 +222,15 @@ def list_redmine_news(
 
     Args:
         project_id: Restrict to one project (numeric ID or string
-            identifier). Redmine applies this server-side; if a server ever
-            ignores it, this tool fails loudly rather than returning other
-            projects' news.
+            identifier). Redmine narrows the collection server-side, and
+            answers 404 for a project that does not exist.
         limit: Maximum news items to return (default 25, max 100).
         offset: Items to skip, for paging.
 
     Returns:
         A list of news dictionaries ``{id, project, author, title, summary,
         description, created_on}``. On failure, a dict with an ``"error"``
-        key.
+        key, with ``code: NOT_FOUND`` for an unknown project.
 
     Examples:
         >>> await list_redmine_news(project_id="my-project", limit=5)
@@ -135,42 +246,18 @@ def list_redmine_news(
             filters["project_id"] = project_id
 
         news_items = _get_redmine_client().news.filter(**filters)
-        result = [_news_to_dict(n) for n in news_items]
-
-        if project_id is not None and result:
-            # Redmine answers 200 with the collection unnarrowed when it does
-            # not read a filter, which is indistinguishable from a filter that
-            # matched everything. A wrong project here would be a plausible
-            # superset, so it is refused instead.
-            wanted = str(project_id)
-            stray = [
-                item
-                for item in result
-                if str(_project_ref_id(item)) != wanted
-                and (item.get("project") or {}).get("name") != project_id
-            ]
-            if len(stray) == len(result):
-                logger.warning(
-                    "The news endpoint ignored project_id=%s; refusing the "
-                    "unnarrowed collection.",
-                    project_id,
-                )
-                return {
-                    "error": (
-                        f"This Redmine did not narrow the news list to "
-                        f"project {project_id!r}; it answered with every "
-                        f"visible news item instead."
-                    ),
-                    "hint": (
-                        "Read the news of a single project through the "
-                        "project page, or call this tool without project_id "
-                        "and filter the result yourself."
-                    ),
-                    "code": "PROJECT_FILTER_IGNORED",
-                }
-
-        return result
+        return [_news_to_dict(n) for n in news_items]
+    except ResourceNotFoundError:
+        return {
+            "error": f"Project {project_id!r} not found.",
+            "code": "NOT_FOUND",
+            "upstream_status": 404,
+            "project_id": project_id,
+        }
     except Exception as e:
+        named = _classify_news_failure(e, project_id=project_id)
+        if named is not None:
+            return named
         context = (
             {"resource_type": "project", "resource_id": project_id}
             if project_id is not None
@@ -223,6 +310,9 @@ def get_redmine_news(
             "news_id": news_id,
         }
     except Exception as e:
+        named = _classify_news_failure(e, news_id=news_id)
+        if named is not None:
+            return named
         return _handle_redmine_error(
             e,
             f"getting news {news_id}",
@@ -260,10 +350,11 @@ def _create_news_action(
         "confirmed": False,
         "code": "CREATE_UNCONFIRMED",
         "warning": (
-            "The news item was created, but Redmine answers a news create "
-            "with 201 and no body, and reading it back did not return a "
-            "record matching the title that was sent. Look the item up in "
-            "the project rather than trusting an id from this call."
+            "The news item was created, but Redmine answers a news write "
+            "with 204 and no body, and reading it back did not return a "
+            "record matching the title that was sent -- most likely someone "
+            "posted to the same project in the same instant. Look the item "
+            "up in the project rather than trusting an id from this call."
         ),
         "sent": {"project_id": project_id, "title": title},
     }
@@ -271,13 +362,16 @@ def _create_news_action(
     try:
         created = _get_redmine_client().news.create(**params)
     except ResourceSetIndexError:
-        # The create itself succeeded (201); only NewsManager's read-back
+        # The create itself succeeded (204); only NewsManager's read-back
         # found nothing. Reporting a failure here would be wrong.
         logger.warning(
             "Created news in project %s but could not read it back.", project_id
         )
         return unconfirmed
     except Exception as e:
+        named = _classify_news_failure(e, project_id=project_id, write=True)
+        if named is not None:
+            return named
         return _handle_redmine_error(
             e,
             "creating news",
@@ -331,6 +425,9 @@ def _update_news_action(
             "news_id": news_id,
         }
     except Exception as e:
+        named = _classify_news_failure(e, news_id=news_id, write=True)
+        if named is not None:
+            return named
         return _handle_redmine_error(
             e,
             f"updating news {news_id}",
@@ -369,9 +466,9 @@ async def manage_redmine_news(
 ) -> Dict[str, Any]:
     """Create or update a Redmine news item (project announcement).
 
-    Needs Redmine 5.1 or newer: writing news over the REST API did not
-    exist before that, and an older server answers with an error rather
-    than silently doing nothing.
+    Needs a Redmine that exposes the news write endpoint -- core Redmine
+    has since 4.1. A server without it answers with an error rather than
+    silently doing nothing.
 
     Deleting is a separate tool, ``delete_redmine_news``, so a deployment
     can offer announcements without offering their destruction.
@@ -416,7 +513,8 @@ def delete_redmine_news(
     refuses unless ``confirm_delete=True``, and the refusal carries a
     preview of what would be lost.
 
-    Needs Redmine 5.1 or newer. For the other operations use
+    Needs a Redmine that exposes the news write endpoints, as core
+    Redmine has since 4.1. For the other operations use
     ``manage_redmine_news`` (create, update), ``get_redmine_news`` or
     ``list_redmine_news``.
 
@@ -489,6 +587,11 @@ def delete_redmine_news(
             "news_id": news_id,
         }
     except Exception as e:
+        named = _classify_news_failure(
+            e, project_id=_project_ref_of(news), news_id=news_id, write=True
+        )
+        if named is not None:
+            return named
         return _handle_redmine_error(
             e,
             f"deleting news {news_id}",

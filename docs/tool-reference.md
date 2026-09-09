@@ -2255,28 +2255,44 @@ manage_redmine_wiki_page(
 
 Project announcements: release notes, maintenance windows, rollout notices.
 Reading has been in the REST API since Redmine 1.1; creating, updating and
-deleting arrived in 5.1, so `manage_redmine_news` and `delete_redmine_news`
-answer with an error on an older server rather than appearing to work.
+deleting arrived in 4.1, so `manage_redmine_news` and `delete_redmine_news`
+answer with an error on a server without them rather than appearing to work.
 
-Two properties of this API are worth knowing, because both are places where
-a call can look successful while being wrong:
+Three properties of this API are worth knowing, because each is a place
+where a call can look successful, or fail for the wrong stated reason:
 
-- **The list endpoint is effectively flat.** There is a nested
-  `/projects/:id/news.json`, but python-redmine's `News` declares
-  `query_filter = '/news.json'` with no placeholder, so `project_id` travels
-  as a query parameter. Redmine reads it -- but a filter Redmine does *not*
-  read is answered with 200 and the collection unnarrowed, which a caller
-  cannot tell apart from a filter that matched everything. So
-  `list_redmine_news` checks the result against what was asked for and
-  refuses with `PROJECT_FILTER_IGNORED` rather than handing over a plausible
-  superset.
-- **Writes come back without a body.** Redmine answers a create with 201 and
-  an update with 204. python-redmine compensates on create by re-reading
-  `news.filter(**params)[0]`, i.e. the newest visible news item -- probably,
-  but not certainly, the one just created. The read-back is verified against
-  the title that was sent; when it cannot be confirmed the tool returns
-  `confirmed: false` with a `CREATE_UNCONFIRMED` code and the values it sent,
-  instead of a neighbour's record with a plausible id.
+- **Every write comes back without a body.** Redmine answers create, update
+  and delete with 204. python-redmine compensates on create by re-reading
+  `news.filter(**self.params)[0]`; those params carry the posted
+  `project_id`, so the read-back is scoped to that project and the remaining
+  race is someone else posting to the *same* project in the same instant.
+  Narrow, but real, so the read-back is verified against the title that was
+  sent; when it cannot be confirmed the tool returns `confirmed: false` with
+  a `CREATE_UNCONFIRMED` code and the values it sent, instead of a
+  neighbour's record with a plausible id.
+- **A 403 can mean the news module is off, or just a missing permission.**
+  Redmine checks the module before it checks any permission, so a module-less
+  project refuses an administrator too and reads like a missing right. The two
+  look identical on the wire, so the tools read the project's modules back and
+  return `NEWS_MODULE_DISABLED` only when the module really is off, pointing
+  at `get_project_modules`; an ordinary denial keeps the plain permission
+  error. This applies to the reads as well -- `list_redmine_news` with a
+  `project_id` hits the same gate. Where the project cannot be determined,
+  as on a `get_redmine_news` whose item is itself refused, nothing is
+  claimed.
+- **A 404 on create can mean the endpoint is missing, not the project.**
+  `News.redmine_version` is `(1, 1, 0)` for the whole resource, so
+  python-redmine raises no version error of its own. When the create 404s but
+  the project still reads back, the tools return `NEWS_WRITE_UNSUPPORTED`
+  rather than letting the caller hunt for a project that is right there. The
+  message names the endpoint, not a version: core Redmine has routed create,
+  update and delete since 4.0 and accepted API auth on them since 4.1, so a
+  404 here says something about the distribution.
+
+The list endpoint takes `project_id` as a query parameter rather than in the
+path, because python-redmine's `News.query_filter` is `/news.json` with no
+placeholder. Redmine narrows on it either way, and answers 404 for a project
+that does not exist -- which `list_redmine_news` reports as `NOT_FOUND`.
 
 ### list_redmine_news
 
@@ -2313,7 +2329,8 @@ Requires the `view_news` permission.
 
 ### manage_redmine_news
 
-Creates or updates a news item. Needs Redmine 5.1 or newer.
+Creates or updates a news item. Needs a Redmine that exposes the news
+write endpoint, as core Redmine has since 4.1.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -2344,6 +2361,9 @@ Without `confirm_delete` the tool refuses and returns
 `code: CONFIRMATION_REQUIRED` with an `impact` preview naming the title and
 counting the comments and attachments that would go with it. This mirrors
 `delete_redmine_issue` and `delete_file`.
+
+Redmine has no endpoint for adding a comment to a news item, so the comments
+in `get_redmine_news` are read-only.
 
 Being its own tool rather than an action of `manage_redmine_news` is
 deliberate: a deployment restricting the exposed tools (see
