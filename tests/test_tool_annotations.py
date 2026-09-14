@@ -59,14 +59,14 @@ class TestAnnotationsTable:
         assert annotations_for("list_redmine_projects").read_only_hint is True
 
     def test_table_size_and_kind_counts(self):
-        assert len(TOOL_KINDS) == 63
+        assert len(TOOL_KINDS) == 68
         counts = {kind: 0 for kind in ToolKind}
         for kind in TOOL_KINDS.values():
             counts[kind] += 1
-        assert counts[ToolKind.READ] == 36
+        assert counts[ToolKind.READ] == 38
         assert counts[ToolKind.WRITE_ADDITIVE] == 6
-        assert counts[ToolKind.WRITE_DESTRUCTIVE] == 16
-        assert counts[ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT] == 5
+        assert counts[ToolKind.WRITE_DESTRUCTIVE] == 18
+        assert counts[ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT] == 6
 
 
 async def _registered_tools():
@@ -90,9 +90,13 @@ class TestRegisteredToolAnnotations:
         assert (
             registered <= classified
         ), f"tools missing from TOOL_KINDS: {registered - classified}"
-        # cleanup_attachment_files registers only when
-        # REDMINE_MCP_EXPOSE_ADMIN_TOOLS is truthy; it must still be mapped.
-        conditional = {"cleanup_attachment_files"}
+        # cleanup_attachment_files registers only under
+        # REDMINE_MCP_EXPOSE_ADMIN_TOOLS and the easy_* tools only under
+        # REDMINE_EASY_ENABLED, both off here; they must still be mapped,
+        # because the middleware denies an unmapped tool outright.
+        from redmine_mcp_server._tool_allow_list import CONDITIONALLY_REGISTERED
+
+        conditional = set(CONDITIONALLY_REGISTERED)
         stale = classified - registered - conditional
         assert not stale, f"stale TOOL_KINDS entries: {stale}"
 
@@ -141,6 +145,13 @@ _EMPTY_SCOPE_KINDS = {
     "manage_crm_note": ToolKind.WRITE_DESTRUCTIVE,
     "list_crm_queries": ToolKind.READ,
     "manage_product": ToolKind.WRITE_DESTRUCTIVE,
+    # Easy Redmine: scope-free because Easy publishes no permission names,
+    # not because these are harmless. Three of the four write.
+    "list_easy_sprints": ToolKind.READ,
+    "list_easy_attendances": ToolKind.READ,
+    "manage_easy_attendance": ToolKind.WRITE_DESTRUCTIVE,
+    "delete_easy_attendance": ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT,
+    "approve_easy_attendances": ToolKind.WRITE_DESTRUCTIVE,
 }
 
 

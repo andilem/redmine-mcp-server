@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Easy Redmine attendance tools: `list_easy_attendances`,
+  `manage_easy_attendance` (create, update), `delete_easy_attendance` and
+  `approve_easy_attendances`, all behind `REDMINE_EASY_ENABLED`. Attendance
+  is presence -- arrival, departure, activity -- not the spent time
+  `list_time_entries` reports, and Easy serves real endpoints for it, so
+  unlike sprints this needs no database access. python-redmine models none
+  of these resources, so the calls go through the engine's raw `request()`
+  in the new `_easy_api` module, which keeps the caller's credentials, the
+  timeout, the SSL settings and the status-to-exception mapping, and turns
+  a 422 whose body lacks `errors` into something better than a `KeyError`.
+  Three of Easy's rough edges are handled rather than passed on: list
+  filters are re-applied to what came back, because Easy Query's parameter
+  syntax is unpublished and Redmine ignores a filter it does not know;
+  `approval_save` has no documented request body, so every approval is
+  verified by reading the records back and an unchanged record reports
+  `APPROVAL_UNCONFIRMED`; and `approval_status` is an enum of 1..6 that Easy
+  names nowhere, so the approve/reject mapping lives in one constant and the
+  tool refuses with `APPROVAL_STATUS_UNKNOWN` until an operator fills it in.
+  Location and IP fields are dropped from every response.
+- `list_easy_sprints` and the four attendance tools now carry `TOOL_SCOPES`
+  and `TOOL_KINDS` entries. Conditional registration had left the sprint
+  tool out of both, and the scope middleware denies an unmapped tool
+  outright -- so under OAuth scope enforcement it was dead rather than
+  merely ungated. They are mapped scope-free, because Easy publishes no
+  permission names to map onto; Redmine's own checks still apply.
 - `manage_redmine_wiki_page` exposes the wiki page hierarchy. `get`, `create`
   and `update` now report `parent_title` (the same key `list` already
   returned), and `create` and `update` accept it, so pages can be filed under

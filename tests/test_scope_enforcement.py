@@ -47,9 +47,13 @@ class TestToolScopesMap:
         assert (
             registered <= mapped
         ), f"tools missing from TOOL_SCOPES: {registered - mapped}"
-        # cleanup_attachment_files registers only when
-        # REDMINE_MCP_EXPOSE_ADMIN_TOOLS is truthy; it must still be mapped.
-        conditional = {"cleanup_attachment_files"}
+        # cleanup_attachment_files registers only under
+        # REDMINE_MCP_EXPOSE_ADMIN_TOOLS and the easy_* tools only under
+        # REDMINE_EASY_ENABLED, both off here; they must still be mapped,
+        # because the middleware denies an unmapped tool outright.
+        from redmine_mcp_server._tool_allow_list import CONDITIONALLY_REGISTERED
+
+        conditional = set(CONDITIONALLY_REGISTERED)
         stale = mapped - registered - conditional
         assert not stale, f"stale TOOL_SCOPES entries: {stale}"
 

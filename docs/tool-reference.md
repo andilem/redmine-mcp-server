@@ -340,6 +340,53 @@ reason it is scoped as narrowly as it is:
   issue -- read-only credentials are no defense, because reading is the
   problem.
 
+#### Attendance
+
+Easy Redmine's attendance module records *presence* -- arrival, departure and
+an activity (at work, home office, holiday, sick). It is not spent time:
+`list_time_entries` reports hours booked against issues, and the same day can
+carry both with different numbers.
+
+Four tools, registered with the same `REDMINE_EASY_ENABLED` flag and needing
+no database access, because Easy does serve these endpoints:
+
+| Tool | Endpoint |
+|---|---|
+| `list_easy_attendances` | `GET /easy_attendances.json` |
+| `manage_easy_attendance` (create, update) | `POST` / `PUT /easy_attendances[/{id}].json` |
+| `delete_easy_attendance` | `DELETE /easy_attendances/{id}.json` |
+| `approve_easy_attendances` | `POST /easy_attendances/approval_save.json` |
+
+python-redmine has no resource class for any of them, so they go through the
+engine's raw `request()` (`_easy_api.easy_request`). That keeps the caller's
+key or bearer token, the timeout, the SSL settings and the status-to-exception
+mapping the rest of the server relies on.
+
+Three properties of this API are worth knowing:
+
+- **Filters are re-applied locally.** Easy narrows list endpoints through
+  Easy Query, whose parameter syntax is not in the published spec, and
+  Redmine drops a filter it does not recognize rather than refusing it. The
+  filters are sent *and* checked against what came back, so an unrecognized
+  one costs extra rows read, never wrong rows answered; a `note` says when
+  that happened. As with sprints, `limit` and `offset` count answered
+  records, not rows read.
+- **`approval_status` is an unnamed enum.** Easy documents it as `1..6` with
+  no meanings, and they are not stable across versions. The raw number is
+  passed through, and `_DECISION_STATUS` in `tools/easy_attendances.py` is
+  the single place that maps approve/reject onto this instance's numbers.
+  Until an operator fills it in, `approve_easy_attendances` refuses with
+  `APPROVAL_STATUS_UNKNOWN` rather than sending a number nobody verified.
+- **The approval request body is undocumented.** The spec gives
+  `approval_save` a summary and a response and no request body at all, so
+  what the tool sends is a reconstruction. Every approval therefore reads the
+  records back and compares `approval_status`; records that did not change
+  are reported as `APPROVAL_UNCONFIRMED`, never as approved.
+
+Location and IP fields (`arrival_latitude`, `departure_user_ip` and their
+siblings) are dropped from every response. They answer "where was this
+person", which no caller of these tools needs.
+
 ### Prompt Injection Protection
 
 All user-controlled content returned from Redmine (issue descriptions, journal notes, wiki page text, search excerpts, version descriptions) is automatically wrapped in unique boundary tags:
