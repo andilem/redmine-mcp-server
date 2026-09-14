@@ -26,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `APPROVAL_UNCONFIRMED`; and `approval_status` is an enum of 1..6 that Easy
   names nowhere, so the approve/reject mapping lives in one constant and the
   tool refuses with `APPROVAL_STATUS_UNKNOWN` until an operator fills it in.
-  Location and IP fields are dropped from every response.
+  Activity ids are per-instance, so a `create` without one answers with
+  the instance's current list from `/easy_entity_activities.json`
+  rather than expecting a guess. Location and IP fields are dropped
+  from every response.
 - `list_easy_sprints` and the four attendance tools now carry `TOOL_SCOPES`
   and `TOOL_KINDS` entries. Conditional registration had left the sprint
   tool out of both, and the scope middleware denies an unmapped tool

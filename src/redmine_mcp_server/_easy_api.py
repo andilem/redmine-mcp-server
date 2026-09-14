@@ -86,6 +86,20 @@ def as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def first_list(value: Any) -> list:
+    """The first array among a response's top-level values.
+
+    Easy wraps collections under a key named after the entity, and the name
+    is not always the one the path suggests -- attendance activities come
+    back from ``/easy_entity_activities.json``. Reading the first list is
+    stable across that naming, and these responses carry exactly one.
+    """
+    for item in as_dict(value).values():
+        if isinstance(item, list):
+            return item
+    return []
+
+
 def describe(value: Any, limit: int = 300) -> str:
     """A short, safe rendering of an unexpected body, for error messages."""
     try:

@@ -175,6 +175,32 @@ class TestCreateAndUpdate:
         assert "activity_id" in result["error"] and "arrival" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_a_missing_activity_is_answered_with_the_instances_list(self):
+        """The ids are per-instance, so the refusal has to carry them: there
+        is no separate tool to look them up with."""
+
+        def _request(method, path, params=None, data=None):
+            assert path == "easy_entity_activities.json"
+            return {
+                "easy_entity_activities": [
+                    {"id": 1, "name": "Office", "at_work": True},
+                    {"id": 3, "name": "Vacation", "use_specify_time": False},
+                ]
+            }
+
+        with patch.object(att_mod, "easy_request", side_effect=_request):
+            result = await manage_easy_attendance(action="create", user_id=5)
+        assert [a["id"] for a in result["activities"]] == [1, 3]
+        assert result["activities"][1]["use_specify_time"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_failing_activity_lookup_still_leaves_a_usable_error(self):
+        with patch.object(att_mod, "easy_request", side_effect=ResourceNotFoundError):
+            result = await manage_easy_attendance(action="create", user_id=5)
+        assert "activity_id" in result["error"]
+        assert "activities" not in result
+
+    @pytest.mark.asyncio
     async def test_create_returns_the_record_the_server_answered_with(self):
         with patch.object(
             att_mod, "easy_request", return_value={"easy_attendance": _record(42)}
@@ -407,6 +433,15 @@ class TestRawEasyRequests:
         with patch(_CLIENT_FACTORY, return_value=client):
             easy_request("get", "/easy_attendances.json")
         assert seen["url"] == "https://redmine.example/easy_attendances.json"
+
+    def test_first_list_finds_the_array_whatever_the_key_is_called(self):
+        """Attendance activities come back from /easy_entity_activities.json,
+        so the wrapper key cannot be derived from the path."""
+        from redmine_mcp_server._easy_api import first_list
+
+        assert first_list({"total_count": 2, "whatever": [1, 2]}) == [1, 2]
+        assert first_list({"total_count": 2}) == []
+        assert first_list(None) == []
 
 
 class TestRegistration:

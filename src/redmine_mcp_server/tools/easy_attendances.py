@@ -37,7 +37,7 @@ from pydantic import Field
 from redminelib.exceptions import ResourceNotFoundError
 
 from .._decorators import ActionMode, action_dispatch
-from .._easy_api import as_dict, describe, easy_request
+from .._easy_api import as_dict, describe, easy_request, first_list
 from .._env import _is_easy_enabled, _is_read_only_mode
 from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
 from .._offload import in_thread, offloaded
@@ -297,6 +297,46 @@ async def list_easy_attendances(
     return await in_thread(_run)
 
 
+def _activities() -> List[Dict[str, Any]]:
+    """The instance's attendance activities, as ``{id, name, ...}``.
+
+    ``GET /easy_entity_activities.json``. The ids are per-instance -- ours
+    runs from Office and Home office through Vacation, Flexday and On-Call
+    Service -- so they are read rather than hardcoded, and a caller that has
+    to name one gets the current list instead of a number to guess.
+
+    ``use_specify_time`` is worth passing on: it is false for the full-day
+    activities (holiday, compassionate leave), where an arrival time is
+    meaningless. ``approval_required`` says whether a record will wait for a
+    decision at all.
+
+    Best effort: a failing read answers with an empty list, because this
+    only ever enriches an error that already stands on its own.
+    """
+    try:
+        payload = easy_request(
+            "get", "easy_entity_activities.json", params={"limit": 100}
+        )
+    except Exception as exc:  # noqa: BLE001 -- enrichment, never the answer
+        logger.debug("Could not read attendance activities: %s", exc)
+        return []
+    activities = []
+    for row in first_list(payload):
+        row = as_dict(row)
+        if row.get("id") is None:
+            continue
+        activities.append(
+            {
+                "id": row.get("id"),
+                "name": row.get("name"),
+                "at_work": row.get("at_work"),
+                "approval_required": row.get("approval_required"),
+                "use_specify_time": row.get("use_specify_time"),
+            }
+        )
+    return activities
+
+
 async def _create_attendance_action(
     user_id: Optional[int] = None,
     activity_id: Optional[int] = None,
@@ -316,7 +356,7 @@ async def _create_attendance_action(
         if value is None
     ]
     if missing:
-        return {
+        refusal: Dict[str, Any] = {
             "error": f"create needs {', '.join(missing)}.",
             "hint": (
                 "user_id is the Redmine user the record belongs to "
@@ -325,6 +365,14 @@ async def _create_attendance_action(
                 "timestamp such as 2026-09-14T08:00:00Z."
             ),
         }
+        if activity_id is None:
+            # The ids are per-instance and there is no tool that lists them,
+            # so the refusal carries them rather than sending the caller to
+            # guess a number. Best effort: a failed read just omits the list.
+            activities = await in_thread(_activities)
+            if activities:
+                refusal["activities"] = activities
+        return refusal
     if not _is_positive_int(user_id) or not _is_positive_int(activity_id):
         return {"error": "user_id and activity_id must be positive integers."}
 
@@ -445,7 +493,9 @@ async def manage_easy_attendance(
         user_id: Whose attendance this is. Required for ``create``. Writing
             another user's record needs the right to do so in Redmine.
         activity_id: Easy attendance activity -- at work, home office,
-            holiday, sick. Required for ``create``.
+            holiday, sick. Required for ``create``. The ids are
+            per-instance; a ``create`` that omits this answers with the
+            instance's current list rather than expecting a guess.
         arrival: Start, ISO 8601 (``2026-09-14T08:00:00Z``). Required for
             ``create``.
         departure: End, ISO 8601. A record without one is an open,

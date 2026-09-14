@@ -383,6 +383,13 @@ Three properties of this API are worth knowing:
   records back and compares `approval_status`; records that did not change
   are reported as `APPROVAL_UNCONFIRMED`, never as approved.
 
+Activity ids are per-instance, and there is no tool that lists them. A
+`create` that omits `activity_id` therefore answers with the instance's
+current list, read from `GET /easy_entity_activities.json`, including
+`approval_required` (whether the record waits for a decision at all) and
+`use_specify_time` (false for full-day activities such as holiday, where an
+arrival time is meaningless). A failed lookup just leaves the plain error.
+
 Location and IP fields (`arrival_latitude`, `departure_user_ip` and their
 siblings) are dropped from every response. They answer "where was this
 person", which no caller of these tools needs.
