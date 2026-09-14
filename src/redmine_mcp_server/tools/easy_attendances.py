@@ -23,11 +23,13 @@ API shape the code:
   reconstruction, so every approval is verified by reading the records back
   and comparing ``approval_status``; an unchanged record is reported as
   unconfirmed rather than as success.
-- **``approval_status`` is an integer with no names.** The spec gives the
-  enum ``1..6`` and no meanings, and they are not stable across Easy
-  versions. Raw numbers are passed through to the caller, and
-  ``_DECISION_STATUS`` is the single place where this deployment's mapping
-  lives.
+- **``approval_status`` is an integer the spec gets wrong.** It documents
+  an unnamed enum of ``1..6``; the column on this instance holds ``NULL``,
+  ``0``, ``1`` (open), ``2`` (approved) and a rare, unexplained ``3``. The
+  raw number is always passed through, ``_APPROVAL_LABELS`` adds a readable
+  ``approval_state`` for the two that are established, and
+  ``_DECISION_STATUS`` is the only place a number may be written from --
+  rejection is not mapped, so it is refused rather than guessed.
 """
 
 import logging
@@ -56,27 +58,39 @@ _MAX_LIMIT = 100
 _PAGE_SIZE = 100
 _MAX_SCAN_ROWS = 1000
 
-# The numbers this deployment's Easy Redmine uses for approval_status.
-# Nothing in the API describes them, so they are configured here rather
-# than guessed at call time, and every response repeats the raw number so a
-# wrong entry here is visible instead of silent. approve_easy_attendances
-# refuses rather than sending a number that was never confirmed.
+# What approval_status means on this deployment. The API's own enum
+# (1..6, unnamed) does not describe the data: the column holds NULL, 0, 1, 2
+# and 3 here. 1 and 2 were established by correlating the column with
+# approved_by_id, approved_at and the activity's approval_required; 0 and
+# NULL are legacy rows that never went through the workflow. 3 is rare and
+# unexplained, which is why it is not mapped: it is the likely "rejected",
+# but likely is not enough to write into someone's working time.
+_APPROVAL_LABELS: Dict[int, str] = {
+    1: "open",
+    2: "approved",
+}
+
+# The numbers approve_easy_attendances is allowed to send. A decision with
+# no number here is refused rather than guessed, and every response repeats
+# the raw number, so a wrong entry is visible instead of silent.
 _DECISION_STATUS: Dict[str, Optional[int]] = {
-    "approve": None,
+    "approve": 2,
     "reject": None,
 }
 
 _UNMAPPED_DECISION = {
     "error": (
-        "This server does not know which approval_status number means "
-        "approved on this Easy Redmine."
+        "This server does not know which approval_status number rejects an "
+        "attendance on this Easy Redmine."
     ),
     "hint": (
-        "Easy's API documents the field as an enum of 1..6 without naming "
-        "any of them, and the numbers differ between versions. Read one "
-        "attendance whose state you can see in the web interface with "
-        "list_easy_attendances, then have the operator record the numbers "
-        "in _DECISION_STATUS in tools/easy_attendances.py."
+        "Easy documents the field as an unnamed enum, and this instance's "
+        "column does not match it: it holds NULL, 0, 1 (open), 2 (approved) "
+        "and a rare 3 that nobody has explained. 3 is the likely rejection, "
+        "but it is unverified. To settle it, reject one record in the web "
+        "interface and read it back with list_easy_attendances, then have "
+        "the operator record the number in _DECISION_STATUS in "
+        "tools/easy_attendances.py. Approving works already."
     ),
     "code": "APPROVAL_STATUS_UNKNOWN",
 }
@@ -112,6 +126,9 @@ def _attendance_to_dict(row: Any) -> Dict[str, Any]:
         # string that reaches a model.
         "description": wrap_insecure_content(row.get("description") or ""),
         "approval_status": row.get("approval_status"),
+        # The raw number stays, because the mapping is this instance's and
+        # the column holds values the API's own enum does not describe.
+        "approval_state": _approval_state(row.get("approval_status")),
         "need_approve": row.get("need_approve"),
         "approved_by": _ref(row.get("approved_by")),
         "approved_at": row.get("approved_at"),
@@ -120,6 +137,20 @@ def _attendance_to_dict(row: Any) -> Dict[str, Any]:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+
+
+def _approval_state(value: Any) -> Optional[str]:
+    """The readable name for an ``approval_status``, where one is known.
+
+    Easy's schema types the field as a string whose enum members are
+    integers, so the wire value could be either; both are accepted rather
+    than betting on one. Anything unmapped answers ``None``, which keeps
+    the rare 3 and the legacy 0/NULL rows unnamed instead of invented.
+    """
+    try:
+        return _APPROVAL_LABELS.get(int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _ref(value: Any) -> Optional[Dict[str, Any]]:
@@ -208,9 +239,12 @@ async def list_easy_attendances(
         ``{"attendances": [...]}``, newest arrival first, each record as
         ``{id, user, arrival, departure, hours, activity, description,
         approval_status, need_approve, approved_by, approved_at, locked,
-        time_entry_id, created_at, updated_at}``. ``approval_status`` is
-        Easy's raw number; the API names none of them. On failure, a dict
-        with an ``"error"`` key.
+        approval_state, time_entry_id, created_at, updated_at}``.
+        ``approval_status`` is Easy's raw number and ``approval_state``
+        names it where this instance's meaning is established (``open``,
+        ``approved``); it is ``None`` for the values that are not, which
+        includes the rare ``3`` and the legacy ``0``/``NULL`` rows. On
+        failure, a dict with an ``"error"`` key.
 
     Note:
         Attendance is not the same as spent time. Use ``list_time_entries``

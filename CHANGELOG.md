@@ -23,9 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   syntax is unpublished and Redmine ignores a filter it does not know;
   `approval_save` has no documented request body, so every approval is
   verified by reading the records back and an unchanged record reports
-  `APPROVAL_UNCONFIRMED`; and `approval_status` is an enum of 1..6 that Easy
-  names nowhere, so the approve/reject mapping lives in one constant and the
-  tool refuses with `APPROVAL_STATUS_UNKNOWN` until an operator fills it in.
+  `APPROVAL_UNCONFIRMED`; and `approval_status` is an enum the spec gets
+  wrong -- it documents 1..6 while the column holds NULL, 0, 1, 2 and a rare
+  3 -- so reads report a raw number plus an `approval_state` for the values
+  established by correlating the column with `approved_by_id`, `approved_at`
+  and the activity's `approval_required` (1 open, 2 approved). Approving
+  sends 2; rejecting is refused with `APPROVAL_STATUS_UNKNOWN` while its
+  number is unverified, because a guess there rewrites someone's working
+  time.
   Activity ids are per-instance, so a `create` without one answers with
   the instance's current list from `/easy_entity_activities.json`
   rather than expecting a guess. Location and IP fields are dropped

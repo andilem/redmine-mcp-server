@@ -89,6 +89,31 @@ class TestSerialization:
         assert out["time_entry_id"] is None
 
 
+class TestApprovalStateLabels:
+    """1 and 2 are established for this instance; nothing else is."""
+
+    def test_the_two_established_numbers_get_names(self):
+        assert _attendance_to_dict(_record(approval_status=1))["approval_state"] == (
+            "open"
+        )
+        assert _attendance_to_dict(_record(approval_status=2))["approval_state"] == (
+            "approved"
+        )
+
+    def test_a_string_status_is_read_too(self):
+        """Easy types the field as a string whose enum members are ints."""
+        assert _attendance_to_dict(_record(approval_status="2"))["approval_state"] == (
+            "approved"
+        )
+
+    @pytest.mark.parametrize("value", [3, 0, None, "", "weird"])
+    def test_everything_unexplained_stays_unnamed(self, value):
+        out = _attendance_to_dict(_record(approval_status=value))
+        assert out["approval_state"] is None
+        # The raw value still travels, so a caller can see what it was.
+        assert out["approval_status"] == value
+
+
 class TestListing:
     @pytest.mark.asyncio
     async def test_rows_the_server_did_not_filter_are_dropped_here(self):
@@ -311,6 +336,21 @@ class TestDelete:
 
 
 class TestApproval:
+    @pytest.mark.asyncio
+    async def test_rejecting_is_refused_while_its_number_is_unverified(self):
+        """3 is the likely rejection and likely is not enough: this writes
+        into someone's working time."""
+        with patch.object(att_mod, "easy_request") as request:
+            result = await approve_easy_attendances(
+                attendance_ids=[1], decision="reject", confirm=True
+            )
+        assert result["code"] == "APPROVAL_STATUS_UNKNOWN"
+        request.assert_not_called()
+
+    def test_approving_sends_the_number_that_was_established(self):
+        assert att_mod._DECISION_STATUS["approve"] == 2
+        assert att_mod._APPROVAL_LABELS[2] == "approved"
+
     @pytest.mark.asyncio
     async def test_it_refuses_a_status_number_nobody_confirmed(self):
         """Easy documents the enum as 1..6 and names none of them."""

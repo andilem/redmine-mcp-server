@@ -371,12 +371,17 @@ Three properties of this API are worth knowing:
   one costs extra rows read, never wrong rows answered; a `note` says when
   that happened. As with sprints, `limit` and `offset` count answered
   records, not rows read.
-- **`approval_status` is an unnamed enum.** Easy documents it as `1..6` with
-  no meanings, and they are not stable across versions. The raw number is
-  passed through, and `_DECISION_STATUS` in `tools/easy_attendances.py` is
-  the single place that maps approve/reject onto this instance's numbers.
-  Until an operator fills it in, `approve_easy_attendances` refuses with
-  `APPROVAL_STATUS_UNKNOWN` rather than sending a number nobody verified.
+- **`approval_status` is an enum the spec gets wrong.** Easy documents
+  `1..6` with no meanings; the column on this instance holds `NULL`, `0`,
+  `1`, `2` and a rare `3`. Correlating it with `approved_by_id`,
+  `approved_at` and the activity's `approval_required` establishes `1` as
+  open and `2` as approved, which `_APPROVAL_LABELS` reports as
+  `approval_state` alongside the raw number; `0` and `NULL` are legacy rows
+  that never went through the workflow, and `3` is unexplained. Approving
+  therefore works, and rejecting is refused with `APPROVAL_STATUS_UNKNOWN`
+  until someone rejects a record in the web interface and reads the number
+  back -- `_DECISION_STATUS` is the only place a value may be written
+  from.
 - **The approval request body is undocumented.** The spec gives
   `approval_save` a summary and a response and no request body at all, so
   what the tool sends is a reconstruction. Every approval therefore reads the
