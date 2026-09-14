@@ -373,15 +373,14 @@ Three properties of this API are worth knowing:
   records, not rows read.
 - **`approval_status` is an enum the spec gets wrong.** Easy documents
   `1..6` with no meanings; the column on this instance holds `NULL`, `0`,
-  `1`, `2` and a rare `3`. Correlating it with `approved_by_id`,
-  `approved_at` and the activity's `approval_required` establishes `1` as
-  open and `2` as approved, which `_APPROVAL_LABELS` reports as
-  `approval_state` alongside the raw number; `0` and `NULL` are legacy rows
-  that never went through the workflow, and `3` is unexplained. Approving
-  therefore works, and rejecting is refused with `APPROVAL_STATUS_UNKNOWN`
-  until someone rejects a record in the web interface and reads the number
-  back -- `_DECISION_STATUS` is the only place a value may be written
-  from.
+  `1` (open), `2` (approved) and `3` (rejected). `_APPROVAL_LABELS` reports
+  those three as `approval_state` alongside the raw number, and
+  `_DECISION_STATUS` is the only place a value may be written from -- a
+  decision with no number there is refused with `APPROVAL_STATUS_UNKNOWN`
+  rather than guessed. `0` and `NULL` are rows that never went through the
+  workflow, so they stay unnamed. The mapping is this instance's: another
+  Easy version may number them differently, which is why it sits in one
+  constant rather than being spread through the code.
 - **The approval request body is undocumented.** The spec gives
   `approval_save` a summary and a response and no request body at all, so
   what the tool sends is a reconstruction. Every approval therefore reads the

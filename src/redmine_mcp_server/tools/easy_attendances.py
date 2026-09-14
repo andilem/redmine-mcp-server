@@ -25,11 +25,11 @@ API shape the code:
   unconfirmed rather than as success.
 - **``approval_status`` is an integer the spec gets wrong.** It documents
   an unnamed enum of ``1..6``; the column on this instance holds ``NULL``,
-  ``0``, ``1`` (open), ``2`` (approved) and a rare, unexplained ``3``. The
-  raw number is always passed through, ``_APPROVAL_LABELS`` adds a readable
-  ``approval_state`` for the two that are established, and
-  ``_DECISION_STATUS`` is the only place a number may be written from --
-  rejection is not mapped, so it is refused rather than guessed.
+  ``0``, ``1`` (open), ``2`` (approved) and ``3`` (rejected). The raw number
+  is always passed through, ``_APPROVAL_LABELS`` names the three that are
+  established, and ``_DECISION_STATUS`` is the only place a number may be
+  written from. ``0`` and ``NULL`` are legacy rows, not a state, and stay
+  unnamed.
 """
 
 import logging
@@ -61,13 +61,14 @@ _MAX_SCAN_ROWS = 1000
 # What approval_status means on this deployment. The API's own enum
 # (1..6, unnamed) does not describe the data: the column holds NULL, 0, 1, 2
 # and 3 here. 1 and 2 were established by correlating the column with
-# approved_by_id, approved_at and the activity's approval_required; 0 and
-# NULL are legacy rows that never went through the workflow. 3 is rare and
-# unexplained, which is why it is not mapped: it is the likely "rejected",
-# but likely is not enough to write into someone's working time.
+# approved_by_id, approved_at and the activity's approval_required, and 3
+# was confirmed against the instance. 0 and NULL are rows that never went
+# through the workflow -- legacy data rather than a state -- so they stay
+# unnamed.
 _APPROVAL_LABELS: Dict[int, str] = {
     1: "open",
     2: "approved",
+    3: "rejected",
 }
 
 # The numbers approve_easy_attendances is allowed to send. A decision with
@@ -75,22 +76,20 @@ _APPROVAL_LABELS: Dict[int, str] = {
 # the raw number, so a wrong entry is visible instead of silent.
 _DECISION_STATUS: Dict[str, Optional[int]] = {
     "approve": 2,
-    "reject": None,
+    "reject": 3,
 }
 
 _UNMAPPED_DECISION = {
     "error": (
-        "This server does not know which approval_status number rejects an "
-        "attendance on this Easy Redmine."
+        "This server does not know which approval_status number this "
+        "decision writes on this Easy Redmine."
     ),
     "hint": (
-        "Easy documents the field as an unnamed enum, and this instance's "
-        "column does not match it: it holds NULL, 0, 1 (open), 2 (approved) "
-        "and a rare 3 that nobody has explained. 3 is the likely rejection, "
-        "but it is unverified. To settle it, reject one record in the web "
-        "interface and read it back with list_easy_attendances, then have "
-        "the operator record the number in _DECISION_STATUS in "
-        "tools/easy_attendances.py. Approving works already."
+        "Easy documents the field as an unnamed enum that does not match "
+        "what instances store, so the mapping is per-deployment. Read a "
+        "record whose state you can see in the web interface with "
+        "list_easy_attendances, then have the operator record the number in "
+        "_DECISION_STATUS in tools/easy_attendances.py."
     ),
     "code": "APPROVAL_STATUS_UNKNOWN",
 }
@@ -241,10 +240,9 @@ async def list_easy_attendances(
         approval_status, need_approve, approved_by, approved_at, locked,
         approval_state, time_entry_id, created_at, updated_at}``.
         ``approval_status`` is Easy's raw number and ``approval_state``
-        names it where this instance's meaning is established (``open``,
-        ``approved``); it is ``None`` for the values that are not, which
-        includes the rare ``3`` and the legacy ``0``/``NULL`` rows. On
-        failure, a dict with an ``"error"`` key.
+        names it (``open``, ``approved``, ``rejected``); it is ``None`` for
+        the legacy ``0``/``NULL`` rows, which never went through the
+        approval workflow. On failure, a dict with an ``"error"`` key.
 
     Note:
         Attendance is not the same as spent time. Use ``list_time_entries``

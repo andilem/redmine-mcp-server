@@ -92,13 +92,12 @@ class TestSerialization:
 class TestApprovalStateLabels:
     """1 and 2 are established for this instance; nothing else is."""
 
-    def test_the_two_established_numbers_get_names(self):
-        assert _attendance_to_dict(_record(approval_status=1))["approval_state"] == (
-            "open"
-        )
-        assert _attendance_to_dict(_record(approval_status=2))["approval_state"] == (
-            "approved"
-        )
+    @pytest.mark.parametrize(
+        "value,label", [(1, "open"), (2, "approved"), (3, "rejected")]
+    )
+    def test_the_established_numbers_get_names(self, value, label):
+        out = _attendance_to_dict(_record(approval_status=value))
+        assert out["approval_state"] == label
 
     def test_a_string_status_is_read_too(self):
         """Easy types the field as a string whose enum members are ints."""
@@ -106,8 +105,8 @@ class TestApprovalStateLabels:
             "approved"
         )
 
-    @pytest.mark.parametrize("value", [3, 0, None, "", "weird"])
-    def test_everything_unexplained_stays_unnamed(self, value):
+    @pytest.mark.parametrize("value", [0, None, "", "weird", 6])
+    def test_rows_outside_the_workflow_stay_unnamed(self, value):
         out = _attendance_to_dict(_record(approval_status=value))
         assert out["approval_state"] is None
         # The raw value still travels, so a caller can see what it was.
@@ -337,23 +336,31 @@ class TestDelete:
 
 class TestApproval:
     @pytest.mark.asyncio
-    async def test_rejecting_is_refused_while_its_number_is_unverified(self):
-        """3 is the likely rejection and likely is not enough: this writes
-        into someone's working time."""
-        with patch.object(att_mod, "easy_request") as request:
+    async def test_rejecting_sends_the_rejection_number(self):
+        sent = {}
+
+        def _request(method, path, params=None, data=None):
+            if method == "get":
+                return {"easy_attendance": _record(1, approval_status=3)}
+            sent.update(data or {})
+            return {"updated_entity_ids": [1]}
+
+        with patch.object(att_mod, "easy_request", side_effect=_request):
             result = await approve_easy_attendances(
                 attendance_ids=[1], decision="reject", confirm=True
             )
-        assert result["code"] == "APPROVAL_STATUS_UNKNOWN"
-        request.assert_not_called()
+        assert sent["approval_status"] == 3
+        assert result["approval_status_sent"] == 3
 
-    def test_approving_sends_the_number_that_was_established(self):
-        assert att_mod._DECISION_STATUS["approve"] == 2
-        assert att_mod._APPROVAL_LABELS[2] == "approved"
+    def test_both_decisions_write_a_number_the_labels_agree_with(self):
+        """The mapping is one instance's, so the two tables cannot drift."""
+        for decision, expected in (("approve", "approved"), ("reject", "rejected")):
+            number = att_mod._DECISION_STATUS[decision]
+            assert att_mod._APPROVAL_LABELS[number] == expected
 
     @pytest.mark.asyncio
-    async def test_it_refuses_a_status_number_nobody_confirmed(self):
-        """Easy documents the enum as 1..6 and names none of them."""
+    async def test_an_unmapped_decision_is_still_refused(self):
+        """The guard stays: blanking a number must refuse, not send None."""
         with patch.dict(att_mod._DECISION_STATUS, {"approve": None}):
             with patch.object(att_mod, "easy_request") as request:
                 result = await approve_easy_attendances(
