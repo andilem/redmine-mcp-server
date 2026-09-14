@@ -33,53 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outright -- so under OAuth scope enforcement it was dead rather than
   merely ungated. They are mapped scope-free, because Easy publishes no
   permission names to map onto; Redmine's own checks still apply.
-- `manage_redmine_wiki_page` exposes the wiki page hierarchy. `get`, `create`
-  and `update` now report `parent_title` (the same key `list` already
-  returned), and `create` and `update` accept it, so pages can be filed under
-  a parent and moved between parents. Omitting the parameter leaves an
-  existing parent untouched and `""` moves a page back to the wiki root, so no
-  existing caller can orphan a page. An unknown parent makes Redmine answer
-  422 with an empty error list on both 6.1 and 7.0; that reasonless failure is
-  replaced with a message naming `parent_title` as the likely cause
-  ([#270](https://github.com/jztan/redmine-mcp-server/issues/270)).
-- News tools: `list_redmine_news`, `get_redmine_news`,
-  `manage_redmine_news` (create, update) and `delete_redmine_news`. News was
-  the last core Redmine resource with no coverage, and there was no
-  workaround either -- `search_entire_redmine` could not reach it. Reading
-  works on any Redmine; writing needs 4.1, where the REST API gained it.
-  Deleting is a separate tool, like `delete_redmine_issue` and `delete_file`,
-  so a deployment restricting its tools can offer announcements without
-  offering their destruction. Comments come back read-only, because Redmine
-  has no endpoint for adding one.
-  Three failure shapes get names instead of being passed on: a create whose
-  204-with-no-body read-back does not match the title that was sent reports
-  `CREATE_UNCONFIRMED` rather than a neighbour's record; a 403 reports
-  `NEWS_MODULE_DISABLED` when reading the project's modules back shows the
-  news module really is off -- Redmine checks it before any permission and
-  refuses an administrator too -- while an ordinary permission denial keeps
-  the plain error; and a 404 on create where the project still reads back
-  reports `NEWS_WRITE_UNSUPPORTED`, because `News.redmine_version` is
-  `(1, 1, 0)` for the whole resource and python-redmine raises no version
-  error of its own. That message names the endpoint rather than a core
-  version, since distributions vary in what they expose.
-  ([#269](https://github.com/jztan/redmine-mcp-server/issues/269))
-- `search_entire_redmine` now searches news alongside issues and wiki pages,
-  which the module docstring already claimed.
-- Issue serializers pass through top-level keys the standard Redmine API does
-  not define, under `unmapped_fields`. Distributions and plugins add their own
-  keys to the issue JSON (Easy Redmine sends `easy_sprint` and
-  `easy_story_points`, for example); a serializer built from a fixed key set
-  dropped them. The values are read from python-redmine's decoded payload,
-  without a lazy fetch. Nulls are dropped, strings are wrapped against prompt
-  injection like any other user-authored text, and a value over 1000 characters
-  once wrapped and serialized is skipped -- the cap is measured after wrapping
-  because that is what reaches the client. `get_redmine_issue`,
-  `list_redmine_issues` and `search_redmine_issues` expose the key; it is
-  omitted when there is nothing to report, so payloads from a stock Redmine are
-  unchanged.
-- `total_estimated_hours` and `total_spent_hours` on the issue serializers.
-  Both are stock Redmine fields carrying the subtask rollup that
-  `estimated_hours` and `spent_hours` leave out.
 - Easy Redmine sprint support behind `REDMINE_EASY_ENABLED` (default off).
   Easy Redmine is a fork rather than a plugin: it serves the same
   `/issues.json` with extra attributes, so most of this is a matter of not
@@ -112,17 +65,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the flag is on, the way `tags` already is: they have their own serializer
   then, and passing them through as well would report them twice.
 
+## [2.15.0] - 2026-09-12
+### Added
+- `manage_redmine_wiki_page` exposes the wiki page hierarchy. `get`, `create`
+  and `update` now report `parent_title` (the same key `list` already
+  returned), and `create` and `update` accept it, so pages can be filed under
+  a parent and moved between parents. Omitting the parameter leaves an
+  existing parent untouched and `""` moves a page back to the wiki root, so no
+  existing caller can orphan a page. An unknown parent makes Redmine answer
+  422 with an empty error list on both 6.1 and 7.0; that reasonless failure is
+  replaced with a message naming `parent_title` as the likely cause
+  ([#270](https://github.com/jztan/redmine-mcp-server/issues/270)).
+- News tools: `list_redmine_news`, `get_redmine_news`,
+  `manage_redmine_news` (create, update) and `delete_redmine_news`. News was
+  the last core Redmine resource with no coverage, and there was no
+  workaround either -- `search_entire_redmine` could not reach it. Reading
+  works on any Redmine; writing needs 4.1, where the REST API gained it.
+  Deleting is a separate tool, like `delete_redmine_issue` and `delete_file`,
+  so a deployment restricting its tools can offer announcements without
+  offering their destruction. Comments come back read-only, because Redmine
+  has no endpoint for adding one.
+  Three failure shapes get names instead of being passed on: a create whose
+  204-with-no-body read-back does not match the title that was sent reports
+  `CREATE_UNCONFIRMED` rather than a neighbour's record; a 403 reports
+  `NEWS_MODULE_DISABLED` when reading the project's modules back shows the
+  news module really is off -- Redmine checks it before any permission and
+  refuses an administrator too -- while an ordinary permission denial keeps
+  the plain error; and a 404 on create where the project still reads back
+  reports `NEWS_WRITE_UNSUPPORTED`, because `News.redmine_version` is
+  `(1, 1, 0)` for the whole resource and python-redmine raises no version
+  error of its own. That message names the endpoint rather than a core
+  version, since distributions vary in what they expose.
+  `search_entire_redmine` searches news alongside issues and wiki pages, which
+  the module docstring already claimed
+  ([#269](https://github.com/jztan/redmine-mcp-server/issues/269)).
+- Issue serializers pass through top-level keys the standard Redmine API does
+  not define, under `unmapped_fields`. Distributions and plugins add their own
+  keys to the issue JSON (Easy Redmine sends `easy_sprint` and
+  `easy_story_points`, for example); a serializer built from a fixed key set
+  dropped them. The values are read from python-redmine's decoded payload,
+  without a lazy fetch. Nulls are dropped, strings are wrapped against prompt
+  injection like any other user-authored text, and a value over 1000 characters
+  once wrapped and serialized is skipped -- the cap is measured after wrapping
+  because that is what reaches the client. `get_redmine_issue`,
+  `list_redmine_issues` and `search_redmine_issues` expose the key; it is
+  omitted when there is nothing to report, so payloads from a stock Redmine are
+  unchanged. The same serializers gain `total_estimated_hours` and
+  `total_spent_hours`, stock Redmine fields carrying the subtask rollup that
+  `estimated_hours` and `spent_hours` leave out
+  ([#263](https://github.com/jztan/redmine-mcp-server/issues/263),
+  [#268](https://github.com/jztan/redmine-mcp-server/pull/268)).
+
 ### Changed
-- `create_redmine_issue` and `update_redmine_issue` document `uploads` in their
-  docstrings, so the parameter reaches the tool schema with the three content
-  sources named rather than as a bare array of objects. `docs/tool-reference.md`
-  described them all along, but a client reads the schema, not the repository:
-  an agent holding a file could not discover that `content_base64` is accepted
-  there, found the documented `file_path` on `upload_file` instead, and hit a
-  wall no configuration can open, because that path is read on the server's
-  filesystem rather than the caller's. The upload-roots error now says so and
-  names `content_base64` and `source_url` as the sources that need no roots at
-  all; `manage_redmine_wiki_page` already documented its own `uploads` this way.
 - Upgraded to FastMCP 4 and the MCP Python SDK v2: `fastmcp>=4.0.1,<5` (locked
   on 4.0.3) pulls in `mcp` 2.1.1 and the new `mcp-types` package
   ([#258](https://github.com/jztan/redmine-mcp-server/issues/258)). The
@@ -137,6 +131,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build; no behaviour change for users.
 
 ### Fixed
+- Every tool parameter now reaches `tools/list` with a description, and a test
+  keeps it that way. `manage_product` was the worst of it: all 13 of its
+  parameters arrived as bare types behind a three-line tool description, which
+  hid the split that matters most, since `create` reads the flat parameters and
+  `update` reads only `fields`, so the natural call from the schema alone
+  (`action="update", product_id=42, price=9.99`) failed with `fields must be a
+  non-empty dict`. Its docstring now says which actions each parameter belongs
+  to, that `status_id` is 1 or 2 and nothing else, that `limit` is clamped at
+  100, and which keys `fields` accepts and silently drops. `manage_deal` and
+  `add_deal_product` had described their parameters but paired two of them per
+  line (`currency, due_date` and `tax, discount`), which the docstring parser
+  does not split, so those four reached the schema empty as well; they are now
+  one entry each. The remaining gaps were `manage_contact`'s `action`, the one
+  parameter its docstring skipped out of 28, and the `project_id` and `filters`
+  of the two MCP Apps backend tools, `get_triage_board_data` and
+  `get_project_dashboard_data`, which are called by the board and dashboard
+  iframes rather than by a model, so that pair was not costing anyone a failed
+  call. With every plugin flag on, all 62 listed tools now describe every
+  parameter they expose. The new check in `tests/test_tool_annotations.py`
+  walks every registered tool with all plugin families visible and fails on any
+  parameter whose schema description is empty; it carries no allowlist, since
+  an exemption list is where the next undocumented parameter would hide
+  ([#277](https://github.com/jztan/redmine-mcp-server/issues/277),
+  [#278](https://github.com/jztan/redmine-mcp-server/issues/278),
+  [#281](https://github.com/jztan/redmine-mcp-server/issues/281)).
+- `uploads` is documented where a client can read it. `create_redmine_issue`
+  and `update_redmine_issue` now describe the parameter in their docstrings,
+  so it reaches `tools/list` with its three content sources named instead of
+  as a bare array of objects. `docs/tool-reference.md` had described them all
+  along, but a client reads the schema, not the repository: an agent holding a
+  file could not discover `content_base64` there, followed the one documented
+  route it could find (`file_path` on `upload_file`) and hit a wall no
+  configuration can open, since that path is read where the server runs rather
+  than where the caller does. The upload-roots error now says which filesystem
+  it means and names the two sources that need no roots at all, and
+  `manage_redmine_wiki_page` carries the same caveat. `upload_file` says which
+  machine it means in its docstring and in both places its reference section
+  describes `file_path`, in place of "already on the server", wording that
+  reads as a fact about the file rather than about the host and sent the
+  reporter looking for a configuration fix; both now also point at the issue
+  and wiki tools for attaching to a ticket or a page
+  ([#275](https://github.com/jztan/redmine-mcp-server/issues/275),
+  [#276](https://github.com/jztan/redmine-mcp-server/pull/276),
+  [#279](https://github.com/jztan/redmine-mcp-server/issues/279)).
 - `oauth-proxy` state now survives a container rebuild. `FASTMCP_HOME` was
   unset by default, so FastMCP resolved its store to the running user's
   platform data directory, which in the image is inside the container
@@ -168,7 +206,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Contributors
 - @andilem proposed and implemented the news tools
-  ([#269](https://github.com/jztan/redmine-mcp-server/issues/269))
+  ([#269](https://github.com/jztan/redmine-mcp-server/issues/269)), reported that
+  `uploads` never reaches the tool schema, so an agent attaching a file follows
+  `file_path` into a wall no configuration can open
+  ([#275](https://github.com/jztan/redmine-mcp-server/issues/275)), and
+  documented the parameter on the issue tools, the wiki tool and the
+  upload-roots error, verified against a Docker deployment behind HTTP
+  ([#276](https://github.com/jztan/redmine-mcp-server/pull/276))
 - @gino8080 reported that the issue serializers drop the top-level keys
   distributions and plugins add
   ([#263](https://github.com/jztan/redmine-mcp-server/issues/263)) and
@@ -1796,6 +1840,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive authentication support (username/password and API key)
 - Docker containerization support
 
+[2.15.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.15.0
 [2.14.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.14.0
 [2.13.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.13.0
 [2.12.0]: https://github.com/jztan/redmine-mcp-server/releases/tag/v2.12.0
