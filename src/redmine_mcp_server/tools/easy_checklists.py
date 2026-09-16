@@ -29,6 +29,8 @@ Two more consequences of that shape:
 import logging
 from typing import Any, Dict, List, Optional, Union
 
+from redminelib.exceptions import ForbiddenError
+
 from .._decorators import ActionMode, action_dispatch
 from .._easy_api import as_dict, describe, easy_request
 from .._env import _is_easy_enabled, _is_read_only_mode
@@ -53,6 +55,59 @@ _CHECKLIST_KEYS = ("checklists", "easy_checklists")
 _ENTITY_TYPE = "Issue"
 
 _MAX_ITEMS = 100
+
+# Checklists are a project module. Redmine checks a module before it checks
+# any permission, so a project without this one refuses an administrator
+# too, and the bare 403 reads as a missing right.
+_CHECKLIST_MODULE = "easy_checklists"
+
+
+def _module_missing_on(issue_id: Optional[int]) -> bool:
+    """Whether the issue's project has the checklist module switched off.
+
+    Answers ``False`` when that cannot be established -- an unreadable
+    issue, an unreadable project, an error on the way -- because claiming a
+    disabled module sends an operator to switch on something that may
+    already be on.
+    """
+    if not _is_positive_int(issue_id):
+        return False
+    try:
+        payload = easy_request("get", f"issues/{issue_id}.json")
+        project_id = as_dict(as_dict(as_dict(payload).get("issue")).get("project")).get(
+            "id"
+        )
+        if project_id is None:
+            return False
+        project = easy_request(
+            "get", f"projects/{project_id}.json", params={"include": "enabled_modules"}
+        )
+    except Exception as exc:  # noqa: BLE001 -- diagnosis, never the answer
+        logger.debug("Could not check the checklist module: %s", exc)
+        return False
+    modules = as_dict(as_dict(project).get("project")).get("enabled_modules")
+    if not isinstance(modules, list):
+        return False
+    names = {as_dict(m).get("name") for m in modules}
+    return _CHECKLIST_MODULE not in names
+
+
+def _module_disabled_error(issue_id: int) -> Dict[str, Any]:
+    return {
+        "error": (
+            "Redmine refused the request because the issue's project has "
+            "the checklist module switched off."
+        ),
+        "hint": (
+            "Enable it under Project settings > Modules > Checklists. "
+            "Redmine checks the module before permissions, so this is "
+            "refused even for an administrator. get_project_modules shows "
+            "what a project has enabled."
+        ),
+        "code": "CHECKLIST_MODULE_DISABLED",
+        "upstream_status": 403,
+        "issue_id": issue_id,
+    }
 
 
 def _item_to_dict(row: Any) -> Dict[str, Any]:
@@ -91,9 +146,14 @@ def _checklist_to_dict(row: Any) -> Dict[str, Any]:
 
 
 def _ref(value: Any) -> Optional[Dict[str, Any]]:
-    """``{id, name}`` for an Easy association, or ``None``."""
+    """``{id, name}`` for an Easy association, or ``None``.
+
+    An id-less object counts as absent. Easy sends ``entity`` as a present
+    but empty object on a checklist read, and reporting ``{"id": null,
+    "name": null}`` would be noise in every response.
+    """
     ref = as_dict(value)
-    if not ref:
+    if not ref or ref.get("id") is None:
         return None
     return {"id": ref.get("id"), "name": ref.get("name")}
 
@@ -248,6 +308,14 @@ async def _create_checklist_action(
             payload = easy_request(
                 "post", "easy_checklists.json", data={"easy_checklist": body}
             )
+        except ForbiddenError as exc:
+            # Only create knows an issue, and an issue is the only way to
+            # reach a project: a checklist read reports its entity as an
+            # empty object, so update and delete cannot name this cause and
+            # do not try.
+            if _module_missing_on(issue_id):
+                return _module_disabled_error(issue_id)
+            return _handle_redmine_error(exc, "creating an Easy Redmine checklist")
         except Exception as exc:
             return _handle_redmine_error(exc, "creating an Easy Redmine checklist")
         record = as_dict(payload).get("easy_checklist")

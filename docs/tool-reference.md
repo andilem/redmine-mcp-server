@@ -427,6 +427,15 @@ undocumented, and deleting has an endpoint that is. Ticking an entry off is
 sent to change one boolean; it reports the whole list afterwards, since the
 item endpoint answers about the item rather than about the list.
 
+Checklists are a **project module**, `easy_checklists`. Redmine checks a
+module before it checks any permission, so a project without it refuses an
+administrator too and answers a bare 403 that reads as a missing right. A
+create reads the issue's project back and reports
+`CHECKLIST_MODULE_DISABLED` only when the module really is off; an ordinary
+denial keeps the plain error. Update and delete cannot do this: a checklist
+read reports its `entity` as an empty object, so there is no project to
+check.
+
 Two deliberate limits: `entity_type` is fixed to `Issue`, because the
 response carries a generic `entity` and other schemas mention
 `easy_checklists` too, but nothing documents what else may carry one -- an

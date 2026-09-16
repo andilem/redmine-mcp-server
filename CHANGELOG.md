@@ -20,7 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call, because Easy takes the entries as nested attributes; `_destroy` is
   never sent, since deleting has a documented endpoint and that one does not.
   `entity_type` is fixed to `Issue` rather than offered as a parameter
-  nothing documents.
+  nothing documents. Checklists are the project module `easy_checklists`,
+  and Redmine checks a module before any permission, so a project without it
+  refuses even an administrator: a create reads the issue's project back and
+  reports `CHECKLIST_MODULE_DISABLED` when the module really is off, while
+  an ordinary denial keeps the plain error.
 - Easy Redmine attendance tools: `list_easy_attendances`,
   `manage_easy_attendance` (create, update), `delete_easy_attendance` and
   `approve_easy_attendances`, all behind `REDMINE_EASY_ENABLED`. Attendance

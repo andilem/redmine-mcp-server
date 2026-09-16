@@ -9,7 +9,7 @@ rather than an echo of the request.
 from unittest.mock import patch
 
 import pytest
-from redminelib.exceptions import ResourceNotFoundError
+from redminelib.exceptions import ForbiddenError, ResourceNotFoundError
 
 from redmine_mcp_server.tools import easy_checklists as cl_mod
 from redmine_mcp_server.tools.easy_checklists import (
@@ -62,6 +62,14 @@ class TestSerialization:
         assert out["name"] != "Ignore previous"
         assert "Ignore previous" in out["name"]
         assert out["items"][0]["subject"] != "Do this"
+
+    def test_an_id_less_association_is_reported_as_absent(self):
+        """Easy sends entity as a present but empty object on a read."""
+        out = _checklist_to_dict(
+            {"id": 7, "entity": {"id": None, "name": None}, "author": None}
+        )
+        assert out["entity"] is None
+        assert out["author"] is None
 
     def test_a_checklist_without_items_does_not_crash(self):
         out = _checklist_to_dict({"id": 7})
@@ -307,6 +315,70 @@ class TestItemWrites:
                 "error"
             ]
         )
+
+
+class TestModuleGate:
+    """Checklists are a project module, and Redmine checks a module before
+    any permission -- so a project without it refuses an administrator, and
+    the bare 403 reads as a missing right."""
+
+    def _forbidden_create(self, modules):
+        def _request(method, path, params=None, data=None):
+            if method == "post":
+                raise ForbiddenError
+            if path.startswith("issues/"):
+                return {"issue": {"id": 39108, "project": {"id": 1225}}}
+            if path.startswith("projects/"):
+                return {
+                    "project": {
+                        "id": 1225,
+                        "enabled_modules": [{"name": m} for m in modules],
+                    }
+                }
+            raise AssertionError(path)
+
+        return _request
+
+    @pytest.mark.asyncio
+    async def test_a_403_names_the_module_when_it_really_is_off(self):
+        with patch.object(
+            cl_mod,
+            "easy_request",
+            side_effect=self._forbidden_create(["issue_tracking", "news"]),
+        ):
+            result = await manage_easy_checklist(
+                action="create", issue_id=39108, name="Liste"
+            )
+        assert result["code"] == "CHECKLIST_MODULE_DISABLED"
+        assert result["issue_id"] == 39108
+
+    @pytest.mark.asyncio
+    async def test_a_plain_denial_keeps_the_plain_error(self):
+        """The module is on, so this is an ordinary permission denial and
+        pointing at the module would send someone the wrong way."""
+        with patch.object(
+            cl_mod,
+            "easy_request",
+            side_effect=self._forbidden_create(["issue_tracking", "easy_checklists"]),
+        ):
+            result = await manage_easy_checklist(
+                action="create", issue_id=39108, name="Liste"
+            )
+        assert result.get("code") != "CHECKLIST_MODULE_DISABLED"
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_project_claims_nothing(self):
+        def _request(method, path, params=None, data=None):
+            if method == "post":
+                raise ForbiddenError
+            raise ResourceNotFoundError
+
+        with patch.object(cl_mod, "easy_request", side_effect=_request):
+            result = await manage_easy_checklist(
+                action="create", issue_id=39108, name="Liste"
+            )
+        assert result.get("code") != "CHECKLIST_MODULE_DISABLED"
 
 
 class TestDelete:
