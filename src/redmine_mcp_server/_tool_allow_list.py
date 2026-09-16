@@ -50,6 +50,10 @@ CONDITIONALLY_REGISTERED = frozenset(
         "manage_easy_attendance",
         "delete_easy_attendance",
         "approve_easy_attendances",
+        "list_easy_checklists",
+        "manage_easy_checklist",
+        "manage_easy_checklist_item",
+        "delete_easy_checklist",
     }
 )
 

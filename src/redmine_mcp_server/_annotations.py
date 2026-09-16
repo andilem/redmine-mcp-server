@@ -126,6 +126,11 @@ TOOL_KINDS: Dict[str, ToolKind] = {
     # Not additive: approving signs off someone's working time, and the
     # decision overwrites whatever approval_status was there before.
     "approve_easy_attendances": ToolKind.WRITE_DESTRUCTIVE,
+    "list_easy_checklists": ToolKind.READ,
+    # Both manage tools update as well as create, like manage_redmine_news.
+    "manage_easy_checklist": ToolKind.WRITE_DESTRUCTIVE,
+    "manage_easy_checklist_item": ToolKind.WRITE_DESTRUCTIVE,
+    "delete_easy_checklist": ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT,
     # --- search ---
     "search_entire_redmine": ToolKind.READ,
     # --- enumeration ---

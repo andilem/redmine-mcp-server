@@ -398,6 +398,42 @@ Location and IP fields (`arrival_latitude`, `departure_user_ip` and their
 siblings) are dropped from every response. They answer "where was this
 person", which no caller of these tools needs.
 
+#### Checklists
+
+Easy's own `easy_checklists`, the to-do lists that hang off an issue. Not the
+RedmineUP plugin behind `get_checklist` and `create_checklist_item`:
+different endpoints, different field names, and the `easy_` prefix is what
+keeps a call from looking right and failing.
+
+| Tool | Endpoint |
+|---|---|
+| `list_easy_checklists` | `GET /issues/{id}.json?include=checklists`, or `GET /easy_checklists/{id}.json` |
+| `manage_easy_checklist` (create, update) | `POST` / `PUT /easy_checklists[/{id}].json` |
+| `manage_easy_checklist_item` (create, update) | `POST` / `PUT /easy_checklist_items[/{id}].json` |
+| `delete_easy_checklist` | `DELETE /easy_checklists/{id}.json` or `/easy_checklist_items/{id}.json` |
+
+**There is no index.** `/easy_checklists.json` accepts a POST and nothing
+else, and items have no read endpoint at all -- so checklists are read
+through the issue that carries them, which is also the only way to learn the
+ids every write needs. Both spellings of the key in the issue payload are
+accepted (`checklists`, `easy_checklists`), because Easy's include parameter
+and its schemas disagree and neither is documented as the response key.
+
+Items are Rails nested attributes: an entry with an `id` changes that entry,
+one without adds it, so a checklist and its entries can be created in a
+single call. `_destroy` is never sent -- whether it works here is
+undocumented, and deleting has an endpoint that is. Ticking an entry off is
+`manage_easy_checklist_item`, so that the common case is not a nested array
+sent to change one boolean; it reports the whole list afterwards, since the
+item endpoint answers about the item rather than about the list.
+
+Two deliberate limits: `entity_type` is fixed to `Issue`, because the
+response carries a generic `entity` and other schemas mention
+`easy_checklists` too, but nothing documents what else may carry one -- an
+unverified parameter that silently does nothing is worse than one that is
+not offered. And a refusal to delete a single entry cannot preview its text,
+because there is no endpoint to read it with.
+
 ### Prompt Injection Protection
 
 All user-controlled content returned from Redmine (issue descriptions, journal notes, wiki page text, search excerpts, version descriptions) is automatically wrapped in unique boundary tags:

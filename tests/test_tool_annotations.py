@@ -59,14 +59,14 @@ class TestAnnotationsTable:
         assert annotations_for("list_redmine_projects").read_only_hint is True
 
     def test_table_size_and_kind_counts(self):
-        assert len(TOOL_KINDS) == 68
+        assert len(TOOL_KINDS) == 72
         counts = {kind: 0 for kind in ToolKind}
         for kind in TOOL_KINDS.values():
             counts[kind] += 1
-        assert counts[ToolKind.READ] == 38
+        assert counts[ToolKind.READ] == 39
         assert counts[ToolKind.WRITE_ADDITIVE] == 6
-        assert counts[ToolKind.WRITE_DESTRUCTIVE] == 18
-        assert counts[ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT] == 6
+        assert counts[ToolKind.WRITE_DESTRUCTIVE] == 20
+        assert counts[ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT] == 7
 
 
 async def _registered_tools():
@@ -152,6 +152,10 @@ _EMPTY_SCOPE_KINDS = {
     "manage_easy_attendance": ToolKind.WRITE_DESTRUCTIVE,
     "delete_easy_attendance": ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT,
     "approve_easy_attendances": ToolKind.WRITE_DESTRUCTIVE,
+    "list_easy_checklists": ToolKind.READ,
+    "manage_easy_checklist": ToolKind.WRITE_DESTRUCTIVE,
+    "manage_easy_checklist_item": ToolKind.WRITE_DESTRUCTIVE,
+    "delete_easy_checklist": ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT,
 }
 
 

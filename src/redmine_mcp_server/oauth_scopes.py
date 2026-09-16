@@ -410,6 +410,10 @@ TOOL_SCOPES: Dict[str, ToolScopeEntry] = {
     "manage_easy_attendance": frozenset(),
     "delete_easy_attendance": frozenset(),
     "approve_easy_attendances": frozenset(),
+    "list_easy_checklists": frozenset(),
+    "manage_easy_checklist": frozenset(),
+    "manage_easy_checklist_item": frozenset(),
+    "delete_easy_checklist": frozenset(),
     # --- documents ---
     "manage_document": {
         "list": frozenset({"view_documents"}),

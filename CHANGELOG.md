@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Easy Redmine checklist tools: `list_easy_checklists`,
+  `manage_easy_checklist` (create, update), `manage_easy_checklist_item`
+  (create, update) and `delete_easy_checklist`, behind `REDMINE_EASY_ENABLED`
+  like the other Easy tools. These are Easy's `easy_checklists`, not the
+  RedmineUP plugin behind `get_checklist`. The API serves no index and no
+  read endpoint for a single entry, so checklists are read through the issue
+  that carries them (`include=checklists`, both spellings of the response key
+  accepted) and every write reports a fresh read of the list rather than an
+  echo of the request. A checklist and its entries can be created in one
+  call, because Easy takes the entries as nested attributes; `_destroy` is
+  never sent, since deleting has a documented endpoint and that one does not.
+  `entity_type` is fixed to `Issue` rather than offered as a parameter
+  nothing documents.
 - Easy Redmine attendance tools: `list_easy_attendances`,
   `manage_easy_attendance` (create, update), `delete_easy_attendance` and
   `approve_easy_attendances`, all behind `REDMINE_EASY_ENABLED`. Attendance
