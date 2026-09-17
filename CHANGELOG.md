@@ -89,6 +89,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   With `unmapped_fields` in place, these four keys are skipped there while
   the flag is on, the way `tags` already is: they have their own serializer
   then, and passing them through as well would report them twice.
+- `REDMINE_AUTH_MODE=api-key-login` gives every user their own Redmine identity
+  on a Redmine without OAuth, such as Easy Redmine or any Redmine older than 6.1.
+  The server acts as its own OAuth authorization server, so MCP clients connect
+  with nothing but its URL (discovery, dynamic client registration, PKCE, refresh
+  tokens). On first use the user pastes their personal Redmine API key into a
+  login page this server serves; the key is checked with Redmine, stored
+  encrypted below `FASTMCP_HOME/api-key-login/` under a key derived from
+  `REDMINE_MCP_JWT_SIGNING_KEY`, and every tool call then runs as that user.
+  Passwords are never accepted. Administrator keys are refused unless
+  `REDMINE_API_KEY_LOGIN_ALLOW_ADMIN=true`, a login works only in the browser
+  that started it, and a key reset in Redmine ends the user's sessions at the
+  next 401 or token refresh, within an hour. OAuth scopes in this mode are a
+  narrowing the client asks for, not Redmine permissions. Setup, security model
+  and session rules: [docs/api-key-login-auth.md](docs/api-key-login-auth.md)
+  ([#261](https://github.com/jztan/redmine-mcp-server/issues/261),
+  [#286](https://github.com/jztan/redmine-mcp-server/pull/286),
+  [#287](https://github.com/jztan/redmine-mcp-server/pull/287)).
+- `REDMINE_API_KEY_LOGIN_BINDING_CRYPTO=token-derived` keeps stored Redmine API
+  keys out of reach of anyone holding both the store and
+  `REDMINE_MCP_JWT_SIGNING_KEY`, at the cost of any server-side read of a stored
+  key. The default stays `server-secret`; switching a running deployment signs
+  everyone out. Trade-offs and switchover:
+  [docs/api-key-login-auth.md](docs/api-key-login-auth.md#binding-protection)
+  ([#299](https://github.com/jztan/redmine-mcp-server/pull/299)).
+- `REDMINE_MCP_EXTENSIONS` imports named Python modules at startup, so a separate
+  package can add tools for a Redmine plugin written in house. The hook is
+  provisional: [docs/extensions.md](docs/extensions.md)
+  ([#294](https://github.com/jztan/redmine-mcp-server/issues/294)).
 
 ### Changed
 - The `uploads` sources are documented caller-first: `content_base64`,
@@ -106,6 +134,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two tests now pin the ordering so it cannot drift back
   ([#303](https://github.com/jztan/redmine-mcp-server/issues/303),
   [#304](https://github.com/jztan/redmine-mcp-server/pull/304)).
+
+### Fixed
+- `legacy-per-user` mode no longer runs a wrong or reset
+  `X-Redmine-API-Key` as the anonymous user. Redmine serves an unknown key as
+  anonymous on anything anonymous may read, so a mistyped key used to return
+  the public view (fewer projects, "no issues") with no error. Each distinct
+  key is now checked once with `GET /users/current.json` and refused with
+  `PER_USER_AUTH` when Redmine answers 401. The result is cached in memory
+  (accepted for 5 minutes, rejected for 60 seconds, at most 1024 keys, stored
+  as digests), so a key reset inside that window can still see the anonymous
+  view until its entry expires. A 403, 5xx or unreachable Redmine lets the
+  request through instead of blaming the key. Redmine's "Authentication
+  required" setting removes the anonymous fallback entirely
+  ([#290](https://github.com/jztan/redmine-mcp-server/issues/290)).
+- Expired OAuth state is now deleted from `FASTMCP_HOME` in `oauth-proxy` and
+  `api-key-login` modes. FastMCP's file store stops serving an expired record
+  but never removes the file, and unauthenticated `/register` and `/authorize`
+  requests write them, so the directory could grow without bound. The cleanup
+  task now sweeps expired files every `CLEANUP_INTERVAL_MINUTES`, starts when
+  the server boots in those modes, and runs even with `AUTO_CLEANUP_ENABLED`
+  off. Records without a TTL, such as `oauth-proxy` client registrations, are
+  kept ([#289](https://github.com/jztan/redmine-mcp-server/issues/289)).
+- `AUTO_CLEANUP_ENABLED` now defaults to `true`, as the README, `server.json`
+  and the `.env` examples have always said. The code read an unset variable as
+  `false`, so the background cleanup never ran unless the variable was set
+  explicitly, and an expired download was only removed if someone requested
+  it again. Set `AUTO_CLEANUP_ENABLED=false` to keep the old
+  behavior. If `ATTACHMENTS_DIR` cannot be created, the server now logs a
+  warning and skips attachment cleanup instead of failing the tool call that
+  started the task ([#296](https://github.com/jztan/redmine-mcp-server/issues/296)).
+
+### Contributors
+- @andilem proposed the `api-key-login` mode and proved it against a production
+  Easy Redmine with a working spike
+  ([#261](https://github.com/jztan/redmine-mcp-server/issues/261)), reviewed its
+  design ([#265](https://github.com/jztan/redmine-mcp-server/discussions/265)),
+  and implemented it
+  ([#286](https://github.com/jztan/redmine-mcp-server/pull/286),
+  [#287](https://github.com/jztan/redmine-mcp-server/pull/287),
+  [#299](https://github.com/jztan/redmine-mcp-server/pull/299)).
+
 
 ## [2.15.0] - 2026-09-12
 ### Added

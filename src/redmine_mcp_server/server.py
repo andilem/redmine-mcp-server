@@ -44,6 +44,11 @@ def _select_auth_provider(auth_mode: str):
         from ._oauth_proxy import build_oauth_proxy
 
         return build_oauth_proxy()
+    if auth_mode == "api-key-login":
+        from ._api_key_login import build_api_key_login
+
+        return build_api_key_login()
+
     if auth_mode == "redmine-login":  # SPIKE stage 2
         from ._redmine_login import RedmineLoginProvider
 
@@ -60,6 +65,80 @@ def _select_auth_provider(auth_mode: str):
             store=store,
         )
     return None
+
+
+def refresh_advertised_scopes(auth_provider) -> None:
+    """Push the current advertised scope list back into the auth provider.
+
+    Every builder snapshots the list into the provider it returns, and
+    ``AUTH_PROVIDER`` is built while this module body runs -- before
+    ``main.py`` has imported the modules ``REDMINE_MCP_EXTENSIONS`` names.
+    So an extension's scopes reach ``advertised_scopes()`` but not the
+    served discovery documents unless the provider is told again. All three
+    providers read their list when ``get_routes()`` builds the HTTP app,
+    which is after extensions load, so one call is enough.
+
+    Each mode keeps the source its own builder used:
+    :func:`oauth_scopes.advertised_scopes` for the OAuth proxy (whose
+    ``valid_scopes`` is what it registers clients against) and
+    :func:`oauth_scopes.configured_advertised_scopes` for the remote
+    provider and for ``api-key-login`` (so ``REDMINE_MCP_SCOPES`` still
+    narrows both). ``None``, the legacy modes, has nothing to refresh.
+
+    Any other provider fails startup if an extension declared scopes to
+    advertise. Left alone it would keep the narrower snapshot, so the
+    discovery documents would omit those scopes and, in a mode that grants
+    from the same list, every tool requiring one would be denied with
+    nothing in the log to say why. A provider nothing was declared for has
+    nothing to lose and is left as it is.
+
+    Imported lazily for the same reason :func:`_select_auth_provider` is:
+    a legacy deployment should not pull in the OAuth machinery.
+    """
+    if auth_provider is None:
+        return
+
+    from ._auth import RedmineAuthProvider
+
+    if isinstance(auth_provider, RedmineAuthProvider):
+        from .oauth_scopes import configured_advertised_scopes
+
+        auth_provider.update_scopes_supported(configured_advertised_scopes())
+        return
+
+    from fastmcp.server.auth.oauth_proxy import OAuthProxy
+
+    if isinstance(auth_provider, OAuthProxy):
+        from .oauth_scopes import advertised_scopes
+
+        auth_provider.update_default_scopes(advertised_scopes())
+        return
+
+    from ._api_key_login import ApiKeyLoginProvider
+
+    if isinstance(auth_provider, ApiKeyLoginProvider):
+        from .oauth_scopes import configured_advertised_scopes
+
+        auth_provider.update_scopes_supported(configured_advertised_scopes())
+        return
+
+    from ._extension_registry import REGISTERED_EXTENSIONS
+
+    declared = sorted(
+        {
+            scope
+            for spec in REGISTERED_EXTENSIONS
+            for scope in (*spec.advertised_read_scopes, *spec.advertised_write_scopes)
+        }
+    )
+    if declared:
+        raise RuntimeError(
+            f"Extensions advertise scope(s) {', '.join(declared)}, but the auth "
+            f"provider is a {type(auth_provider).__name__}, which this server "
+            "does not know how to refresh. It would keep the scope list it was "
+            "built with, so discovery would omit these scopes and every tool "
+            "that requires one would be denied."
+        )
 
 
 def _register_middlewares(mcp_instance, auth_provider) -> None:
@@ -83,6 +162,16 @@ def _register_middlewares(mcp_instance, auth_provider) -> None:
             "call any tool. Re-enable after tokens are re-consented with "
             "the required scopes."
         )
+
+    # After the scope check, so a call denied for scope never looks like a
+    # rejected Redmine key and never costs anyone their session. Imported
+    # inside the branch, matching _select_auth_provider: the other OAuth modes
+    # should not pull this module in either.
+    if REDMINE_AUTH_MODE == "api-key-login":
+        from ._api_key_login import ApiKeyLoginProvider, BindingRevocationMiddleware
+
+        if isinstance(auth_provider, ApiKeyLoginProvider):
+            mcp_instance.add_middleware(BindingRevocationMiddleware(auth_provider))
 
 
 AUTH_PROVIDER = _select_auth_provider(REDMINE_AUTH_MODE)
