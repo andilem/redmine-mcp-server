@@ -193,6 +193,7 @@ When enabled, the following tools return an error instead of executing
 - `delete_redmine_issue`
 - `copy_issue`
 - `upload_file`
+- `create_upload_ticket`
 - `delete_file`
 - `import_time_entries`
 - `update_checklist_item` (also requires `REDMINE_CHECKLISTS_ENABLED=true`)
@@ -202,6 +203,9 @@ When enabled, the following tools return an error instead of executing
 - `manage_issue_note` — all actions
 - `manage_time_entry` — all actions
 - `manage_redmine_version` — all actions (`create`, `update`, `delete`)
+- `manage_redmine_project` — all actions (`create`, `update`, `close`, `reopen`)
+- `manage_redmine_news`: all actions (`create`, `update`)
+- `delete_redmine_news`
 - `add_deal_product` (also requires `REDMINE_DEALS_ENABLED=true` and `REDMINE_PRODUCTS_ENABLED=true`)
 
 **Partially blocked (read actions still work):**
@@ -813,6 +817,110 @@ manage_redmine_version(
     action="delete",
     version_id=42,
 )
+```
+
+---
+
+### `manage_redmine_project`
+
+Create a Redmine project, edit its settings, or close and reopen it. This tool
+writes the project record itself; its contents have their own tools
+(`manage_redmine_version`, `manage_project_member`, `manage_issue_category`).
+
+Archiving is not offered: Redmine gates `archive` and `unarchive` on
+administrator rights rather than on a project permission, and this server never
+advertises the `admin` scope. Deleting is not offered either — it destroys every
+issue, wiki page and file in the project and in each of its subprojects.
+
+**Parameters:**
+- `action` (string, required): Operation to perform. Allowed values: `create`, `update`, `close`, `reopen`
+- `project_id` (integer or string): Project ID or identifier. Required for `action="update"`, `action="close"` and `action="reopen"`
+- `name` (string): Project name. Required for `action="create"`
+- `identifier` (string): URL identifier, e.g. `lunar-programme`. Required for `action="create"`; rejected for `action="update"`, because Redmine freezes the identifier once the project exists
+- `description` (string, optional): Project description
+- `homepage` (string, optional): Project homepage URL
+- `is_public` (boolean, optional): Whether the project is visible to non-members. Needs the `select_project_publicity` permission; without it Redmine ignores the field rather than refusing the call
+- `parent_id` (integer, optional): Parent project ID. Creating a subproject needs `add_subprojects` on the parent
+- `inherit_members` (boolean, optional): Whether the project inherits the parent's members
+- `enabled_module_names` (array of strings, optional): Modules to enable, e.g. `["issue_tracking", "wiki"]`. Replaces the current set. Needs the `select_project_modules` permission; without it Redmine ignores the field rather than refusing the call
+- `tracker_ids` (array of integers, optional): Tracker IDs to enable. Replaces the current set
+- `issue_custom_field_ids` (array of integers, optional): Issue custom field IDs to enable. Replaces the current set
+- `default_assigned_to_id` (integer, optional): Default assignee user ID
+- `default_version_id` (integer, optional): Default version ID
+- `default_issue_query_id` (integer, optional): Default issue query ID. Redmine accepts it but does not render it back, so it is absent from the response
+- `custom_fields` (array of objects, optional): Custom field values, as Redmine's own `{"id": ..., "value": ...}` entries
+
+**Returns:** the full project dictionary, read back from Redmine after the
+write — `PUT /projects/{id}.json` answers `204 No Content`, and reading back is
+also what shows the caller whether a permission-gated field took effect.
+
+The read-back asks for `include=enabled_modules,trackers,issue_custom_fields`,
+so every collection the tool can write comes back in the response. That is what
+makes a silently dropped `enabled_module_names` visible: Redmine discards it
+for a caller without `select_project_modules` and still answers `204`, and
+`enabled_modules` in the response is the only way to tell. All three includes
+are gated on `include_in_api_response?` alone, so they need no extra scope.
+
+Modules come back as names, matching the `enabled_module_names` parameter that
+writes them; trackers and issue custom fields come back as `{id, name}`,
+because `tracker_ids` and `issue_custom_field_ids` write them by id.
+
+On `create` the read-back is best-effort. The project exists by then, so a
+failure to read it is never reported as an error — that would invite a retry
+and a duplicate project. Redmine adds the creator as a member only when a
+default role is configured, so a non-admin creator on an instance without one
+can create a project and then be refused `projects#show`. In that case the
+response is the creation body, which carries every field except the three
+include arrays, and the server logs a warning.
+
+```json
+{
+  "id": 42,
+  "name": "Lunar Programme",
+  "identifier": "lunar-programme",
+  "description": "<insecure-content-...>...</insecure-content-...>",
+  "homepage": "https://example.com/apollo",
+  "parent": {"id": 7, "name": "Space"},
+  "status": 1,
+  "is_public": false,
+  "inherit_members": true,
+  "default_version": {"id": 5, "name": "v1.0"},
+  "default_assignee": {"id": 4, "name": "Jo Doe"},
+  "custom_fields": [{"id": 11, "name": "Cost centre", "value": "CC-900"}],
+  "enabled_modules": ["issue_tracking", "wiki"],
+  "trackers": [{"id": 1, "name": "Bug"}, {"id": 2, "name": "Feature"}],
+  "issue_custom_fields": [{"id": 11, "name": "Cost centre"}],
+  "created_on": "2026-01-01T10:00:00",
+  "updated_on": "2026-04-01T14:30:00"
+}
+```
+
+Error: `{"error": "..."}`
+
+**Examples:**
+
+```python
+# Create a subproject with two modules enabled
+manage_redmine_project(
+    action="create",
+    name="Lunar Programme",
+    identifier="lunar-programme",
+    parent_id=7,
+    description="Apollo follow-on",
+    enabled_module_names=["issue_tracking", "wiki"],
+)
+
+# Rename a project and point it at a new homepage
+manage_redmine_project(
+    action="update",
+    project_id="lunar-programme",
+    name="Lunar Programme (2026)",
+    homepage="https://example.com/apollo",
+)
+
+# Close a finished project, and reopen it later
+manage_redmine_project(action="close", project_id="lunar-programme")
+manage_redmine_project(action="reopen", project_id="lunar-programme")
 ```
 
 ---
@@ -2278,9 +2386,9 @@ List, get, create, update, delete, or rename a Redmine wiki page. Replaces `list
 - `uploads` (list, optional): Files to attach to the page on `create` and `update`. Requires the `edit_wiki_pages` permission on the project. Maximum 10 items. Each item is an object with:
   - Exactly ONE source key:
     - `upload_id` (string): A file staged with `create_upload_ticket`. **The way to send a file that lives on the caller's own machine** — the caller POSTs the bytes to the ticket's `upload_url` in one request, so they go from disk to the server directly and are never written into a tool argument. Filename defaults to the one the ticket was created with.
-    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem. Where the server runs on the caller's machine that includes the caller's own files, and this source costs no tokens; over HTTP the two are different hosts, and no value of `REDMINE_MCP_UPLOAD_FILE_ROOTS` can bridge the gap — such a file travels as `content_base64` or `source_url`, neither of which needs roots configured.
     - `source_url` (string): HTTP(S) URL the server fetches. Filename is derived from the URL or `Content-Disposition` if omitted.
-    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem. Where the server runs on the caller's machine that includes the caller's own files, and this source costs no tokens; over HTTP the two are different hosts, and no value of `REDMINE_MCP_UPLOAD_FILE_ROOTS` can bridge the gap — such a file travels as `content_base64` or `source_url`, neither of which needs roots configured.
+    - `content_base64` (string): Raw file bytes encoded as base64. `filename` is required when using this source. For small content the caller **generated**, not for a file on disk: the payload is written out character by character by the model and a long one does not reliably survive that. Pass `sha256` with it.
+    - `file_path` (string): Absolute path to a file already on the server. Must be inside `ATTACHMENTS_DIR` or a directory listed in `REDMINE_MCP_UPLOAD_FILE_ROOTS`. Filename is derived from the path if omitted. The path is resolved on the server's own filesystem, so it reaches the caller's own files only where the server runs on the caller's machine; against a server on a different host it cannot, whatever the roots are set to.
   - `filename` (string, optional): Name the attachment will have in Redmine. Required for `content_base64`; derived for other sources when omitted.
   - `sha256` (string, optional) / `size_bytes` (integer, optional): what the caller meant to send. Checked after the content is resolved and before anything reaches Redmine; a mismatch refuses the whole call. Worth passing with `content_base64`, whose payload is written out by the model and can arrive mangled.
   - `content_type` (string, optional): MIME type override (e.g. `"application/xml"`).
@@ -2569,7 +2677,7 @@ Reserve a slot for a file on the caller's own machine and return the URL to send
 
 **Flow:**
 1. Call `create_upload_ticket`.
-2. Send the file to `upload_url` in one HTTP request, ticket in the `X-Upload-Ticket` header, file as the body (`application/octet-stream`, or `multipart/form-data` with a single `file` part). The response carries `upload_id`, `size` and `sha256`.
+2. Send the file to `upload_url` in one HTTP request, ticket in the `X-Upload-Ticket` header, the raw file as the body. The response carries `upload_id`, `size` and `sha256`. Multipart is deliberately not accepted — Starlette's `request.form()` buffers the whole body before its size can be checked, so the cap would not hold.
 3. Name that `upload_id` as the content source — in `uploads` on `create_redmine_issue`, `update_redmine_issue` or `manage_redmine_wiki_page`, or on `upload_file`.
 
 ```bash
