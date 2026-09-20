@@ -64,11 +64,18 @@ engages on that parameter; without it the filter is dropped and Redmine
 answers 200 with the collection unnarrowed, which reads exactly like a
 filter that matched everything.
 
-Reading needs no registration. Easy's top-level issue keys come back under
-`unmapped_fields`, which upstream's serializer emits for exactly this case.
-The shape is Redmine's own — `unmapped_fields.easy_sprint` rather than a
-top-level `easy_sprint` normalized to `{id, name, due_date}` — which is the
-price of not being a patch.
+Reading needs almost no registration. Easy's top-level issue keys come back
+under `unmapped_fields`, which upstream's serializer emits for exactly this
+case. The shape is Redmine's own — `unmapped_fields.easy_sprint` rather than
+a top-level `easy_sprint` normalized to `{id, name, due_date}` — which is
+the price of not being a patch.
+
+The exception is `css_classes`, declared in `issue_payload_skip_keys` and
+therefore absent. It is the CSS class list Easy's issue grid renders with:
+99–144 characters on every issue, 202 on the wire once wrapped, 5,062 for a
+default 25-issue listing, and it answers nothing the issue's own fields do
+not answer better — `status-11` beside `status`, `overdue` beside
+`due_date`. `is_favorited` stays: that is per-user state, not presentation.
 
 ## Database access
 

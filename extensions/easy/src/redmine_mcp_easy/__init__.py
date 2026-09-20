@@ -23,13 +23,17 @@ a diff is now three declarations:
   reads exactly like a filter that matched everything.
 - ``tool_kinds`` and ``tool_scopes`` for the nine tools below.
 
-The issue *response* needs no declaration at all. Easy's top-level keys
+The issue *response* needs almost none. Easy's top-level keys
 (``easy_sprint``, ``easy_story_points`` and the two sprint-position ones)
 come back under ``unmapped_fields``, which upstream's serializer emits for
 exactly this case -- a distribution's own keys, read from the payload rather
 than fetched, and wrapped against prompt injection like every other
 user-authored string. The shape is Redmine's own rather than one this
 package chose, which is the price of not being a patch.
+
+The one exception is ``issue_payload_skip_keys``: ``unmapped_fields`` would
+otherwise carry Easy's ``css_classes`` on every single issue, and that one
+is for its renderer and nobody else.
 
 Deployment::
 
@@ -108,6 +112,17 @@ register_extension(
         # unregistered name is dropped by Redmine, which then answers 200
         # with the collection unnarrowed.
         issue_query_filters={"easy_sprint_id": {"set_filter": 1}},
+        # `css_classes` is the CSS class list Easy's issue grid renders
+        # with. It rides on every issue -- 99 to 144 characters across a
+        # page of 25, 202 on the wire once wrapped, 5,062 for a default
+        # listing -- and answers nothing the issue's own fields do not
+        # answer better: `status-11` beside `status`, `overdue` beside
+        # `due_date`. Too short for the size cap to catch, which is why
+        # #331 exists.
+        #
+        # `is_favorited` deliberately stays. It is per-user state, not
+        # presentation, and a caller can reasonably want it.
+        issue_payload_skip_keys=("css_classes",),
     )
 )
 

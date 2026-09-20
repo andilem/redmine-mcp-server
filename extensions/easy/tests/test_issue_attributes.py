@@ -192,3 +192,37 @@ async def test_it_does_not_ride_along_unasked(easy_on):
         await list_redmine_issues(project_id=1)
 
         assert "set_filter" not in mock_redmine.issue.filter.call_args.kwargs
+
+
+# --- hiding: issue_payload_skip_keys -------------------------------------
+
+
+def test_css_classes_stays_out_of_the_response(easy_on):
+    """Easy's issue grid renders with it; nobody reading the issue needs it.
+
+    Measured on a live instance, a page of 25 issues carried 99 to 144
+    characters of it each -- 202 on the wire once wrapped, 5,062 for one
+    default listing -- with `status-11` sitting beside the issue's own
+    `status` and `overdue` beside its `due_date`. Too short for the size cap
+    to catch, which is what #331 added the seam for.
+    """
+    css = "issue tracker-203 status-11 priority-24 overdue child scheme-4"
+    result = _issue_to_dict(_issue(css_classes=css, easy_sprint=SPRINT))
+
+    assert "css_classes" not in result["unmapped_fields"]
+    assert "easy_sprint" in result["unmapped_fields"], "the useful keys stay"
+
+
+def test_it_comes_back_with_the_flag_off(easy_off):
+    """The seam is the family's, so it follows the family's flag."""
+    result = _issue_to_dict(_issue(css_classes="issue status-8"))
+
+    assert "css_classes" in result["unmapped_fields"]
+
+
+def test_is_favorited_is_not_hidden(easy_on):
+    """Per-user state, not presentation. The seam is not a way to trim
+    unmapped_fields to taste."""
+    result = _issue_to_dict(_issue(is_favorited=True))
+
+    assert result["unmapped_fields"]["is_favorited"] is True
