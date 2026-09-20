@@ -475,6 +475,15 @@ hold for them:
   loaded, before the HTTP app is built.
 - Each registered family gets its own key in the `plugin_flags` dict
   `get_mcp_server_info` returns, next to the built-in ones.
+- A family can also widen two of the issue tools while it is enabled: the
+  attributes `update_redmine_issue` writes rather than treating as custom
+  field names, and the filter names `list_redmine_issues` accepts, with the
+  query parameters those filters need. Values are validated as they are for
+  any other filter, and a filter name and a companion parameter may not be
+  the same thing in either direction -- including the `cf_<id>` spellings --
+  so nothing rides along that narrows a query the caller did not narrow. Registered
+  attributes reach Redmine on `create_redmine_issue` too: both write paths
+  share the step that would otherwise read the name as a custom field's.
 
 Two of this server's guarantees are not middleware, so an extension applies
 them in its own tools exactly as the built-in ones do.
@@ -1065,14 +1074,16 @@ Retrieve detailed information about a specific Redmine issue.
 - `include_attachments` (boolean, optional): Include attachments metadata. Default: `true`
 - `include_custom_fields` (boolean, optional): Include custom fields in result. Default: `true`
 - `journal_limit` (integer, optional): Maximum number of journals to return. When set, enables journal pagination and adds `journal_pagination` metadata. Default: `null` (all journals)
-- `journal_offset` (integer, optional): Number of journals to skip (used with `journal_limit`). Default: `0`
+- `journal_offset` (integer, optional): Number of journals to skip, counted from whichever end `journal_order` selects (used with `journal_limit`). Default: `0`
+- `journal_order` (string, optional): `"asc"` (default, oldest first) or `"desc"` (newest first). **`"desc"` is what answers "the last few comments"** — with `"asc"`, a `journal_limit` returns the *oldest* ones and reaching the newest needs `journal_offset = total - journal_limit`, which means fetching everything first to learn `total`. Journals are sorted by id before either order is applied, so the result does not depend on the "display comments in reverse chronological order" setting of the account behind the API key. Echoed back as `order` in `journal_pagination`.
 - `include_watchers` (boolean, optional): Include watcher list. Default: `false`
 - `include_relations` (boolean, optional): Include issue relations. Default: `false`. Requires only `view_issues`. Each entry is `{id, issue_id, issue_to_id, relation_type, delay}`.
 - `include_children` (boolean, optional): Include child issues. Default: `false`
 - `include_journal_values` (boolean, optional): Return the before/after text of field changes in full instead of by length. Default: `false` — see **Journal field changes** below.
+- `fields` (list, optional): Narrow the issue's own keys, with the same meaning `list_redmine_issues` gives it — `null`, `["*"]` and `["all"]` return everything, an unknown name is skipped rather than refused, and naming `custom_fields` or `relations` implies the matching flag. **It does not reach journals, attachments or custom fields**: those `include_*` switches stay independent and all three default to `true`, so `fields=["id", "status"]` alone still returns them. A cheap read is `fields` together with `include_journals=false`, `include_attachments=false` and `include_custom_fields=false`. `description_sha256` comes back either way, so a caller can patch a description it chose not to read.
 
 
-**Returns:** Issue dictionary with details, journals, and attachments. Standard fields include `category`, `fixed_version` (target version), and `parent` (each `{id, ...}` or `None`), plus `start_date`, `due_date`, `closed_on` (ISO-8601 or `None`), `done_ratio`, `estimated_hours`, `spent_hours`, `total_estimated_hours`, `total_spent_hours` (the last two include subtasks), and `is_private`. Each is `None` when not set on the issue. When `REDMINE_AGILE_ENABLED=true`, also includes `story_points`, `agile_sprint_id`, and `agile_position` from the RedmineUP Agile plugin. Top-level keys the standard Redmine API does not define (added by a distribution or plugin, e.g. Easy Redmine's `easy_sprint` and `easy_story_points`) are passed through under `unmapped_fields`; the key is omitted when there are none. Null values are dropped, every string inside is wrapped in the same `<insecure-content-...>` boundary tags as `description` (nested ones included), and a value longer than 1000 characters once wrapped and serialized is skipped -- the cap is measured after wrapping because that is the size that reaches the client. The cap is a size rule, not a name list, so plugin rendering data such as Easy Redmine's `css_classes` still comes through when it is short enough.
+**Returns:** Issue dictionary with details, journals, and attachments, plus `description_sha256` — the digest of the raw description, for `update_redmine_issue`'s `description_expected_sha256`. Standard fields include `category`, `fixed_version` (target version), and `parent` (each `{id, ...}` or `None`), plus `start_date`, `due_date`, `closed_on` (ISO-8601 or `None`), `done_ratio`, `estimated_hours`, `spent_hours`, `total_estimated_hours`, `total_spent_hours` (the last two include subtasks), and `is_private`. Each is `None` when not set on the issue. When `REDMINE_AGILE_ENABLED=true`, also includes `story_points`, `agile_sprint_id`, and `agile_position` from the RedmineUP Agile plugin. Top-level keys the standard Redmine API does not define (added by a distribution or plugin, e.g. Easy Redmine's `easy_sprint` and `easy_story_points`) are passed through under `unmapped_fields`; the key is omitted when there are none. Null values are dropped, every string inside is wrapped in the same `<insecure-content-...>` boundary tags as `description` (nested ones included), and a value longer than 1000 characters once wrapped and serialized is skipped -- the cap is measured after wrapping because that is the size that reaches the client. The cap is a size rule, not a name list, so plugin rendering data such as Easy Redmine's `css_classes` still comes through when it is short enough.
 
 **Journal field changes (#313):** a journal's `details` entries describe field changes as `{property, name, old_value, new_value}`. Redmine records a description edit with the **full old and new text**, so a ticket whose description is edited repeatedly carries several copies of it in its change log — on one real ticket that was 827 KB of an 879 KB response, against 4.7 KB of actual comment text. Values longer than `REDMINE_MCP_JOURNAL_VALUE_MAX_CHARS` (default 500) are therefore reported by length:
 
@@ -1377,7 +1388,8 @@ Creates a new issue in the specified project. Blocked when `REDMINE_MCP_READ_ONL
 **Parameters:**
 - `project_id` (integer, required): Target project ID
 - `subject` (string, required): Issue subject/title
-- `description` (string, optional): Issue description. Default: `""`
+- `description` (string, optional): Issue description. Default: `""`. Mutually exclusive with `description_upload_id`.
+- `description_upload_id` (string, optional): Take the whole description from a file staged with [`create_upload_ticket`](#create_upload_ticket), decoded as UTF-8. **The way to open an issue with a long description.**
 - `fields` (object|string, optional): Additional Redmine fields as:
   - an object (`{"priority_id": 3, "tracker_id": 1}`), or
   - a serialized JSON object string (for MCP clients that pass string payloads)
@@ -1394,6 +1406,18 @@ Creates a new issue in the specified project. Blocked when `REDMINE_MCP_READ_ONL
   - `sha256` (string, optional) / `size_bytes` (integer, optional): what the caller meant to send. Checked after the content is resolved and before anything reaches Redmine; a mismatch refuses the whole call. Worth passing with `content_base64`, whose payload is written out by the model and can arrive mangled.
   - `content_type` (string, optional): MIME type override (e.g. `"application/pdf"`).
   - `description` (string, optional): Human-readable description for the attachment.
+
+**A long description (#326):** at creation the whole text is new by definition, so there is nothing to patch and no prior version to guard — `description_upload_id` is the only alternative to writing it out into the tool argument, and it takes no checksum. Write the text to a file, send it with the ticket route, and name the `upload_id` here. A description written into `description` is produced a token at a time with nothing to check it against, which is the same failure `content_base64` has for attachments; it stays right for a short one.
+
+```python
+# ticket = create_upload_ticket(filename="description.html")
+# curl -sS -H "X-Upload-Ticket: $TICKET" --data-binary @description.html "$UPLOAD_URL"
+create_redmine_issue(
+    project_id=1,
+    subject="Cleanup-Review",
+    description_upload_id="6f1e...",
+)
+```
 
 **Returns:** Created issue dictionary. When `uploads` is provided and at least one attachment succeeds, the response includes:
 - `attachments` (list): Metadata for each attached file (id, filename, filesize, content_url, etc.).
@@ -1491,6 +1515,29 @@ Updates an existing issue with the provided fields. Blocked when `REDMINE_MCP_RE
   - `sha256` (string, optional) / `size_bytes` (integer, optional): what the caller meant to send. Checked after the content is resolved and before anything reaches Redmine; a mismatch refuses the whole call. Worth passing with `content_base64`, whose payload is written out by the model and can arrive mangled.
   - `content_type` (string, optional): MIME type override (e.g. `"application/pdf"`).
   - `description` (string, optional): Human-readable description for the attachment.
+
+
+**Patching a long description (#314):** Redmine has no patch endpoint, so passing `description` means sending the finished text — every character of it written into the tool argument. For a long field that is slow (the text is generated one token at a time) and unreliable (a long transcription drops text). Send the change instead:
+
+```python
+update_redmine_issue(
+    issue_id=123,
+    fields={},
+    description_edits=[{"find": "runs on two nodes", "replace": "runs on four nodes"}],
+    description_expected_sha256="<digest of the description as it was read>",
+)
+```
+
+- `description_edits` (list, optional): `{find, replace}` pairs, applied in order on the server. Each `find` must occur **exactly once** in the text as it stands after the preceding edits; zero matches or several refuse the whole call and change nothing, so include enough surrounding text to be unambiguous. Mutually exclusive with a `description` in `fields`.
+- `description_expected_sha256` (string, optional): the digest the description had when it was read. **Echo back the `description_sha256` that `get_redmine_issue` returns** — do not hash the `description` you read, because it is wrapped in `<insecure-content-...>` tags whose id changes on every call, so your digest would never match. Checked before any edit is applied; a mismatch refuses the call instead of overwriting whatever changed in between, and names the current digest so the retry can carry it. Worth passing whenever the read and the write are not in the same breath.
+
+`find` and `replace` are matched with line endings normalized, since Redmine's web UI saves CRLF and a multi-line `find` written with plain newlines would otherwise never match text it is looking straight at. The stored convention is restored on write, so patching does not rewrite every line ending in the field.
+
+A failed edit is reported with the index of the pair that failed and leaves the issue untouched — a half-applied patch is worse than none.
+
+**Replacing a long description wholesale:** where the text really is all new rather than edited, `description_upload_id` takes it from a file staged with [`create_upload_ticket`](#create_upload_ticket), decoded as UTF-8. The content then travels from disk to the server instead of through the conversation, the same way an attachment does. This composes with how an oversized read already comes back — the client writes it to a file the caller can edit in place, and this is the way back.
+
+`description`, `description_edits` and `description_upload_id` are mutually exclusive; passing more than one is refused, naming which were given.
 
 **Returns:** Updated issue dictionary. When `uploads` is provided and at least one attachment succeeds, the response includes:
 - `attachments` (list): Metadata for each attached file (id, filename, filesize, content_url, etc.).
@@ -1801,13 +1848,17 @@ Edit text or toggle privacy of a Redmine journal entry (issue note). `get_privat
 
 **Parameters:**
 - `action` (string, required): Allowed: `edit`, `set_private`
-- `journal_id` (integer, required): ID of the journal entry (from `get_redmine_issue` with `include_journals=true`)
-- `notes` (string): New notes text (may be empty to clear). Required for `action="edit"`
+- `journal_id` (integer, required): ID of the journal entry (from `get_redmine_issue` with `include_journals=true`). Each journal in that response also carries `notes_sha256`, the digest of its raw notes, for `notes_expected_sha256`
+- `notes` (string): New notes text (may be empty to clear). For `action="edit"`, one of `notes` or `notes_upload_id` is required and they are mutually exclusive
+- `notes_upload_id` (string, optional): Take the new note from a file staged with [`create_upload_ticket`](#create_upload_ticket), decoded as UTF-8. **Prefer this for a long note** — the text goes from disk to the server instead of being written out into the tool argument, which is slow for a long one and drops characters. The response then carries `notes_length` and `notes_sha256` instead of the note itself, since echoing it back would put the whole thing in the conversation anyway
+- `notes_edits` (list, optional): Change part of a long note in place: `{find, replace}` pairs applied in order on the server. Each `find` must occur **exactly once** in the note as it stands after the preceding edits; zero matches or several refuse the whole call and write nothing. **Requires `issue_id`.** Mutually exclusive with `notes` and `notes_upload_id`
+- `notes_expected_sha256` (string, optional): the digest the note had when it was read. **Echo back the `notes_sha256` each journal carries** — do not hash the `notes` you read, they are wrapped in boundary tags whose id changes per call. Checked before any edit; a mismatch refuses the call rather than overwriting whatever changed in between
+- `issue_id` (integer, optional): the issue the journal belongs to. **Required with `notes_edits` and ignored otherwise** — patching reads the note first, and Redmine offers no endpoint for a single journal, so it can only be read through its issue. A `journal_id` that is not among that issue's visible journals is refused and nothing is written
 - `private_notes` (boolean, optional): Optionally toggle the private flag during `edit`
 - `is_private` (boolean): Required for `action="set_private"` — `true` to mark private, `false` to make public
 
 **Returns:**
-- `edit`: `{"success": true, "journal_id": ..., "notes": ..., "private_notes": ...}`
+- `edit`: `{"success": true, "journal_id": ..., "notes": ..., "private_notes": ...}`, or with `notes_upload_id` `{"success": true, "journal_id": ..., "notes_length": ..., "notes_sha256": ..., "private_notes": ...}`
 - `set_private`: `{"success": true, "journal_id": ..., "private_notes": <bool>}`
 - Error: `{"error": "..."}`
 
@@ -2690,7 +2741,7 @@ Reserve a slot for a file on the caller's own machine and return the URL to send
 **Flow:**
 1. Call `create_upload_ticket`.
 2. Send the file to `upload_url` in one HTTP request, ticket in the `X-Upload-Ticket` header, the raw file as the body. The response carries `upload_id`, `size` and `sha256`. Multipart is deliberately not accepted — Starlette's `request.form()` buffers the whole body before its size can be checked, so the cap would not hold.
-3. Name that `upload_id` as the content source — in `uploads` on `create_redmine_issue`, `update_redmine_issue` or `manage_redmine_wiki_page`, or on `upload_file`.
+3. Name that `upload_id` as the content source — in `uploads` on `create_redmine_issue`, `update_redmine_issue` or `manage_redmine_wiki_page`, or on `upload_file`. A staged file can also *be* a long text field rather than an attachment: `description_upload_id` on `create_redmine_issue` and `update_redmine_issue`, and `notes_upload_id` on `manage_issue_note`.
 
 ```bash
 curl -sS -H "X-Upload-Ticket: $TICKET" --data-binary @mockup.png "$UPLOAD_URL"

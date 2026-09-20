@@ -2,6 +2,7 @@
 relations, watchers, notes, and categories.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -36,7 +37,9 @@ from .._env import (
     _is_tags_enabled,
 )
 from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
+from .._extension_registry import extension_issue_query_filters
 from .._offload import in_thread, offloaded
+from .. import _upload_store
 from .._serialization import (
     _attachment_to_dict,
     _custom_fields_to_list,
@@ -361,7 +364,14 @@ def _reject_issue_filters(filters: Any) -> Optional[str]:
     )
     if reserved:
         return reserved
-    known_names = _ISSUE_QUERY_FILTER_NAMES
+    # Two ways in, deliberately both. Upstream's `ExtensionSpec` registry is
+    # the general one; our Easy family predates it, lives in this tree and is
+    # switched by `REDMINE_EASY_ENABLED` rather than registered, so its names
+    # still have to be added by hand. Dropping either side would silently
+    # un-narrow a query: Redmine answers 200 with the whole collection for a
+    # filter it does not know, which reads exactly like one that matched
+    # everything. Widening the list rather than opening it is the point.
+    known_names = _ISSUE_QUERY_FILTER_NAMES | frozenset(extension_issue_query_filters())
     if _is_easy_enabled():
         known_names = known_names | _EASY_QUERY_FILTER_NAMES
     unregistered = _reject_unregistered_filter_keys(
@@ -1044,6 +1054,14 @@ def _journals_to_list(
                     else None
                 ),
                 "notes": wrap_insecure_content(notes) if notes else "",
+                # Of the *raw* notes, not of what sits in ``notes`` above:
+                # ``wrap_insecure_content`` adds boundary tags with a fresh
+                # random id per call, so a caller hashing what it read could
+                # never match. Echo this back as ``notes_expected_sha256``
+                # to patch safely (#317).
+                "notes_sha256": hashlib.sha256(
+                    (notes or "").encode("utf-8")
+                ).hexdigest(),
                 "created_on": _safe_isoformat(getattr(journal, "created_on", None)),
                 "private_notes": bool(getattr(journal, "private_notes", False)),
                 "details": details,
@@ -1116,6 +1134,8 @@ def _journal_to_dict(
             else None
         ),
         "notes": wrap_insecure_content(notes) if notes else "",
+        # See ``_journals_to_list``: the digest is of the raw notes (#317).
+        "notes_sha256": hashlib.sha256((notes or "").encode("utf-8")).hexdigest(),
         "created_on": _safe_isoformat(getattr(journal, "created_on", None)),
         "details": _journal_details_to_list(journal, include_journal_values),
     }
@@ -1132,10 +1152,12 @@ async def get_redmine_issue(
     include_custom_fields: bool = True,
     journal_limit: Annotated[Optional[int], Field(ge=1, le=1000)] = None,
     journal_offset: Annotated[int, Field(ge=0)] = 0,
+    journal_order: Literal["asc", "desc"] = "asc",
     include_watchers: bool = False,
     include_relations: bool = False,
     include_children: bool = False,
     include_journal_values: bool = False,
+    fields: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Retrieve a specific Redmine issue by ID. Fetch issue details,
     view a ticket, show a bug report, get issue with comments,
@@ -1159,8 +1181,18 @@ async def get_redmine_issue(
         journal_limit: Maximum number of journals to return. When set,
             enables journal pagination and adds ``journal_pagination``
             metadata to the response.
-        journal_offset: Number of journals to skip (used with
-            ``journal_limit``). Defaults to ``0``.
+        journal_offset: Number of journals to skip, counted from whichever
+            end ``journal_order`` selects (used with ``journal_limit``).
+            Defaults to ``0``.
+        journal_order: ``"asc"`` (default, oldest first) or ``"desc"``
+            (newest first). Journals are sorted by id before either is
+            applied, so the order does not depend on the "display comments
+            in reverse chronological order" setting of the account behind
+            the API key. **``"desc"`` is what answers "the last few
+            comments"**: with ``"asc"``, a ``journal_limit`` returns the
+            oldest ones, and reaching the newest needs ``journal_offset =
+            total - journal_limit``, which means fetching everything first
+            to learn ``total``.
         include_watchers: Whether to include the issue's watchers, returned
             under ``watchers`` as ``[{"id", "name"}, ...]``. Defaults to
             ``False``.
@@ -1170,6 +1202,20 @@ async def get_redmine_issue(
         include_children: Whether to include the issue's direct children,
             returned under ``children`` as ``[{"id", "subject", "tracker"},
             ...]``. Defaults to ``False``.
+        fields: Narrow the issue's own keys, with the same meaning
+            ``list_redmine_issues`` gives it: ``None``, ``["*"]`` or
+            ``["all"]`` return everything, and a name the serializer does
+            not know is skipped rather than refused. Naming
+            ``custom_fields`` or ``relations`` implies the matching flag.
+            **This does not reach the journals, attachments or custom
+            fields**, whose ``include_*`` switches stay independent and all
+            three default to ``True`` -- so ``fields=["id", "status"]`` on
+            its own still returns every journal, attachment and custom
+            field. A genuinely cheap read is ``fields=[...]`` together with
+            ``include_journals=False``, ``include_attachments=False`` and
+            ``include_custom_fields=False``. ``description_sha256`` is
+            returned either way, since it is what lets a caller patch the
+            description without reading it.
         include_journal_values: Return the before/after text of field
             changes in full instead of by length. Defaults to ``False``,
             because Redmine journals a description edit with both the old
@@ -1209,6 +1255,18 @@ async def get_redmine_issue(
         try:
             # python-redmine is synchronous, so this whole block runs in a
             # worker thread via in_thread() rather than on the event loop.
+
+            # Naming `custom_fields` or `relations` in `fields` implies the
+            # matching flag, as it does in `list_redmine_issues` (#319).
+            # `want_relations` is decided here, above the include list,
+            # rather than at the serializer: relations only reach us when
+            # `include=relations` is on the request, so building the list
+            # from `include_relations` alone told the serializer to emit a
+            # key Redmine had never been asked to fill.
+            selected = fields if isinstance(fields, (list, tuple)) else []
+            want_custom_fields = include_custom_fields or "custom_fields" in selected
+            want_relations = include_relations or "relations" in selected
+
             includes = []
             if include_journals:
                 includes.append("journals")
@@ -1216,7 +1274,7 @@ async def get_redmine_issue(
                 includes.append("attachments")
             if include_watchers:
                 includes.append("watchers")
-            if include_relations:
+            if want_relations:
                 includes.append("relations")
             if include_children:
                 includes.append("children")
@@ -1228,9 +1286,38 @@ async def get_redmine_issue(
             else:
                 issue = _get_redmine_client().issue.get(issue_id)
 
-            result = _issue_to_dict(issue, include_custom_fields=include_custom_fields)
+            # Same field selection `list_redmine_issues` has, through the
+            # same helper, so the two read tools narrow identically: `None`,
+            # `["*"]` and `["all"]` mean everything, and a name the
+            # serializer does not know is skipped rather than refused.
+            result = _issue_to_dict_selective(
+                issue,
+                fields,
+                include_custom_fields=want_custom_fields,
+                include_relations=want_relations,
+            )
+            # The digest is of the *raw* description, not of what sits in
+            # ``description`` above it: ``wrap_insecure_content`` adds boundary
+            # tags with a fresh random id on every call, so a caller hashing
+            # what it read could never match the stored text. Echo this back as
+            # ``description_expected_sha256`` to patch safely (#314).
+            result["description_sha256"] = hashlib.sha256(
+                (getattr(issue, "description", "") or "").encode("utf-8")
+            ).hexdigest()
             if include_journals:
                 all_journals = _journals_to_list(issue, include_journal_values)
+
+                # Sort rather than trust what Redmine sent. IssuesController
+                # reverses the journals for an API user who has "display
+                # comments in reverse chronological order" set, so the order
+                # -- and with it which journals a `journal_limit` returns --
+                # depends on the account behind the key. Journal ids are
+                # assigned in creation order, so sorting by id makes `asc`
+                # and `desc` mean the same thing for everyone (#318).
+                all_journals.sort(key=lambda entry: entry.get("id") or 0)
+                if journal_order == "desc":
+                    all_journals.reverse()
+
                 if journal_limit is not None:
                     total = len(all_journals)
                     offset = journal_offset
@@ -1242,6 +1329,8 @@ async def get_redmine_issue(
                         "limit": journal_limit,
                         "count": len(paginated),
                         "has_more": (offset + journal_limit) < total,
+                        # Which end `offset` counts from.
+                        "order": journal_order,
                     }
                 else:
                     result["journals"] = all_journals
@@ -1251,7 +1340,7 @@ async def get_redmine_issue(
             if include_watchers:
                 raw = getattr(issue, "watchers", None) or []
                 result["watchers"] = [{"id": w.id, "name": w.name} for w in raw]
-            if include_relations:
+            if want_relations:
                 # From the include= payload, not the lazy issue.relations
                 # attribute -- see _included_list.
                 result["relations"] = _issue_relations_to_list(issue)
@@ -1469,6 +1558,7 @@ async def list_redmine_issues(
             if filters:
                 redmine_api_filters.update(filters)
 
+            # The companion parameter, from both sides of the check above.
             # Easy Redmine replaces Redmine's filter handling with Easy Query,
             # which engages on `set_filter`. Redmine itself builds an API
             # query from the parameters either way (`api_request?` takes the
@@ -1477,6 +1567,15 @@ async def list_redmine_issues(
             # stock request byte-identical to what it was.
             if any(key in redmine_api_filters for key in _EASY_QUERY_FILTER_NAMES):
                 redmine_api_filters.setdefault("set_filter", 1)
+
+            # The same thing for a family that came in through the registry:
+            # merged only when that filter is in this call, and never over a
+            # value the caller set.
+            for name, params in extension_issue_query_filters().items():
+                if name not in redmine_api_filters:
+                    continue
+                for key, value in params.items():
+                    redmine_api_filters.setdefault(key, value)
 
             # Naming either in `fields` implies the flag, so a caller does not
             # have to set both and get an empty key for their trouble.
@@ -1843,6 +1942,7 @@ async def create_redmine_issue(
     fields: Optional[Union[Dict[str, Any], str]] = None,
     extra_fields: Optional[Union[Dict[str, Any], str]] = None,
     uploads: Optional[List[Dict[str, Any]]] = None,
+    description_upload_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new issue in Redmine. Open a ticket, file a bug,
     submit a feature request, log a support case, or report a task.
@@ -1871,7 +1971,19 @@ async def create_redmine_issue(
     Args:
         project_id: Project the issue belongs to (numeric ID).
         subject: The issue's title.
-        description: The issue's description. Optional.
+        description: The issue's description. Optional. Mutually exclusive
+            with ``description_upload_id``.
+        description_upload_id: Take the whole description from a file staged
+            with ``create_upload_ticket``, decoded as UTF-8, instead of
+            writing it out here. **The way to open an issue with a long
+            description.** At creation the text is new by definition, and a
+            long one written into this argument is produced a token at a
+            time with nothing to check it against -- the same failure
+            ``content_base64`` has for attachments. The staged file travels
+            from disk to this server in one request. No checksum goes with
+            it: there is no prior text to guard, and the bytes never passed
+            through the conversation. Mutually exclusive with
+            ``description``.
         fields: Standard and custom fields, as an object or a JSON object
             string. Attachments do not go here -- see ``uploads``.
         extra_fields: Further fields, merged into ``fields``. Object or JSON
@@ -1942,6 +2054,32 @@ async def create_redmine_issue(
                 "'fields' or 'extra_fields'."
             )
         }
+
+    # The same two ways of setting a long description the update path has,
+    # minus the one that has no meaning here: at creation there is no prior
+    # text to patch (#326). Checked before the uploads are resolved, since
+    # an argument error costs nothing to report and that step does I/O.
+    #
+    # Truthiness rather than "was it passed": ``description`` is a string
+    # with a default of ``""``, so an empty one is indistinguishable from an
+    # omitted one and refusing it would only reject a harmless call.
+    if description and description_upload_id:
+        return {
+            "error": (
+                "Set the description one way at a time; got description, "
+                "description_upload_id."
+            )
+        }
+
+    if description_upload_id:
+        staged_text, staged_error = _text_from_staged_upload(
+            description_upload_id, "description"
+        )
+        if staged_error is not None:
+            return staged_error
+        # Read into the parameter the create call already closes over, so
+        # both the first attempt and the required-custom-field retry send it.
+        description = staged_text
 
     upload_descriptors: List[Dict[str, Any]] = []
     if uploads:
@@ -2084,11 +2222,139 @@ async def create_redmine_issue(
     return await in_thread(_run)
 
 
+def _normalized_newlines(text: str) -> str:
+    """Collapse CRLF and lone CR to LF, for comparison only."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _apply_text_edits(
+    current: str,
+    edits: Any,
+    expected_sha256: Optional[str],
+    label: str,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Apply ``{find, replace}`` pairs to a text, server-side (#314).
+
+    Redmine replaces a long field wholesale -- there is no patch endpoint --
+    so the finished text has to come from somewhere. Having the *model*
+    produce it means writing out every character of, say, a 50 KB
+    description: slow, because output is generated sequentially, and lossy,
+    because a long transcription drops text (the same failure as #305, an
+    order of magnitude up). Sending the edits instead keeps the payload to
+    the passage that actually changed.
+
+    Each ``find`` must match exactly once in the text as it stands *after*
+    the preceding edits. Zero matches means the caller is working from a
+    different version than it thinks; more than one means the edit is
+    ambiguous and could land in the wrong place. Both refuse the whole call,
+    because a half-applied patch is worse than none.
+
+    Matching is done with line endings normalized. Redmine's web UI saves
+    CRLF, and a caller writing a multi-line ``find`` with plain newlines
+    would otherwise never match text it is looking straight at. The stored
+    convention is restored on the way out, so patching a field does not
+    silently rewrite every line ending in it.
+
+    Returns ``(new_text, None)`` or ``(None, {"error": ...})``.
+    """
+    if expected_sha256:
+        if not isinstance(expected_sha256, str):
+            return None, {"error": f"{label}_expected_sha256 must be a hex string."}
+        actual = hashlib.sha256(current.encode("utf-8")).hexdigest()
+        if actual != expected_sha256.strip().lower():
+            return None, {
+                "error": (
+                    f"{label} has changed since it was read: expected sha256 "
+                    f"{expected_sha256.strip().lower()}, found {actual}. Read "
+                    "it again and rebase the edits, rather than overwriting "
+                    f"someone else's change -- {actual} is the digest the "
+                    f"rebased call should carry, and it is reported as "
+                    f"{label}_sha256 on the read."
+                )
+            }
+
+    if not isinstance(edits, list) or not edits:
+        return None, {"error": f"{label}_edits must be a non-empty list."}
+
+    had_crlf = "\r\n" in current
+    text = _normalized_newlines(current)
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            return None, {"error": f"{label}_edits[{index}] must be an object."}
+        find = edit.get("find")
+        replace = edit.get("replace")
+        if not isinstance(find, str) or find == "":
+            return None, {
+                "error": f"{label}_edits[{index}]: 'find' must be a non-empty string."
+            }
+        if not isinstance(replace, str):
+            return None, {
+                "error": f"{label}_edits[{index}]: 'replace' must be a string."
+            }
+
+        find = _normalized_newlines(find)
+        replace = _normalized_newlines(replace)
+        occurrences = text.count(find)
+        if occurrences == 0:
+            return None, {
+                "error": (
+                    f"{label}_edits[{index}]: 'find' does not occur in the "
+                    f"current {label}. Nothing was changed. Read the current "
+                    "text and base the edit on it."
+                )
+            }
+        if occurrences > 1:
+            return None, {
+                "error": (
+                    f"{label}_edits[{index}]: 'find' occurs {occurrences} times, "
+                    "so the edit is ambiguous. Nothing was changed. Include "
+                    "enough surrounding text to make it unique."
+                )
+            }
+        text = text.replace(find, replace, 1)
+
+    if had_crlf:
+        text = text.replace("\n", "\r\n")
+    return text, None
+
+
+def _text_from_staged_upload(
+    upload_id: str, label: str
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Read a staged upload as the new text for a long field (#314).
+
+    The counterpart to patching. Where the whole text really is new, the
+    caller writes it to a file, sends it with the ticket route from #306, and
+    names the ``upload_id`` here -- so the field's content travels from disk
+    to this server instead of being written out into a tool argument. That
+    also composes with how an oversized read already comes back: the client
+    spills it to a file the caller can edit in place, and this is the way
+    back.
+
+    Returns ``(text, None)`` or ``(None, {"error": ...})``.
+    """
+    content_bytes, _, staged_error = _upload_store.read_staged(upload_id)
+    if staged_error is not None:
+        return None, staged_error
+    try:
+        return content_bytes.decode("utf-8"), None
+    except UnicodeDecodeError as exc:
+        return None, {
+            "error": (
+                f"The file staged for {label} is not valid UTF-8 ({exc}). "
+                f"A {label} is text; upload it encoded as UTF-8."
+            )
+        }
+
+
 @mcp.tool()
 async def update_redmine_issue(
     issue_id: int,
     fields: Dict[str, Any],
     uploads: Optional[List[Dict[str, Any]]] = None,
+    description_edits: Optional[List[Dict[str, str]]] = None,
+    description_expected_sha256: Optional[str] = None,
+    description_upload_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Update an existing Redmine issue.
 
@@ -2160,6 +2426,32 @@ async def update_redmine_issue(
 
             An attachment referenced from the description or a note as
             ``attachment:"name.png"`` is rendered inline by Redmine.
+        description_edits: Change the description by naming what to replace,
+            instead of sending the whole text. A list of
+            ``{"find": ..., "replace": ...}``, applied in order on this
+            server. **Prefer this for anything long.** Redmine has no patch
+            endpoint, so a full ``description`` means writing every
+            character of it into this argument: slow, because that text is
+            generated one token at a time, and unreliable, because a long
+            transcription drops text. Each ``find`` must occur exactly once
+            in the text as it stands after the preceding edits -- zero
+            matches or several refuse the whole call and change nothing, so
+            include enough surrounding text to be unambiguous. Mutually
+            exclusive with a ``description`` in ``fields``.
+        description_expected_sha256: The hex digest the description had when
+            it was read -- **echo back the ``description_sha256`` that
+            ``get_redmine_issue`` returns**; do not hash what you read, since
+            the description is wrapped in boundary tags whose id changes on
+            every call. Verified before any edit is applied, and a mismatch
+            refuses the call rather than overwriting whatever changed in
+            between, naming the current digest so the retry can carry it.
+            Worth passing whenever the read and the write are not in the
+            same breath.
+        description_upload_id: Take the whole description from a file staged
+            with ``create_upload_ticket``, decoded as UTF-8. For when the
+            text really is all new rather than edited: the content travels
+            from disk to this server instead of through the conversation.
+            Mutually exclusive with the other two ways of setting it.
     """
 
     if _is_read_only_mode():
@@ -2180,6 +2472,59 @@ async def update_redmine_issue(
             return upload_error
 
     update_fields = dict(fields)
+
+    # Two ways to set a long description without writing it out into a tool
+    # argument: patch what changed, or point at a file already staged on this
+    # server (#314). Both are exclusive with a literal ``description``.
+    description_sources = [
+        name
+        for name, given in (
+            ("description in fields", "description" in update_fields),
+            ("description_edits", description_edits is not None),
+            ("description_upload_id", bool(description_upload_id)),
+        )
+        if given
+    ]
+    if len(description_sources) > 1:
+        return {
+            "error": (
+                "Set the description one way at a time; got "
+                + ", ".join(description_sources)
+                + "."
+            )
+        }
+
+    if description_upload_id:
+        staged_text, staged_error = _text_from_staged_upload(
+            description_upload_id, "description"
+        )
+        if staged_error is not None:
+            return staged_error
+        update_fields["description"] = staged_text
+
+    if description_edits is not None:
+
+        def _read_description() -> Any:
+            return _get_redmine_client().issue.get(issue_id)
+
+        try:
+            current_issue = await in_thread(_read_description)
+        except Exception as exc:  # noqa: BLE001 - surfaced as an error dict
+            return _handle_redmine_error(
+                exc,
+                f"reading issue {issue_id} to patch its description",
+                {"resource_type": "issue", "resource_id": issue_id},
+            )
+
+        patched, patch_error = _apply_text_edits(
+            getattr(current_issue, "description", "") or "",
+            description_edits,
+            description_expected_sha256,
+            "description",
+        )
+        if patch_error is not None:
+            return patch_error
+        update_fields["description"] = patched
 
     # Extract agile fields — python-redmine's core update does not understand
     # ``agile_data_attributes``, so they must be routed to the RedmineUP Agile
@@ -2915,23 +3260,114 @@ def _edit_issue_note_action(
     journal_id: Optional[int] = None,
     notes: Optional[str] = None,
     private_notes: Optional[bool] = None,
+    notes_upload_id: Optional[str] = None,
+    notes_edits: Optional[List[Dict[str, str]]] = None,
+    notes_expected_sha256: Optional[str] = None,
+    issue_id: Optional[int] = None,
     **_: Any,
 ) -> Dict[str, Any]:
-    if notes is None:
-        return {"error": "notes is required for action 'edit'"}
+    sources = [
+        name
+        for name, given in (
+            ("notes", notes is not None),
+            ("notes_upload_id", bool(notes_upload_id)),
+            ("notes_edits", notes_edits is not None),
+        )
+        if given
+    ]
+    if not sources:
+        return {
+            "error": (
+                "action 'edit' needs the new text: notes, notes_upload_id "
+                "for a note staged with create_upload_ticket, or notes_edits "
+                "to change part of a long one in place."
+            )
+        }
+    if len(sources) > 1:
+        return {
+            "error": ("Set the note one way at a time; got " + ", ".join(sources) + ".")
+        }
+
+    from_upload = bool(notes_upload_id)
+    if from_upload:
+        staged, staged_error = _text_from_staged_upload(notes_upload_id, "notes")
+        if staged_error is not None:
+            return staged_error
+        notes = staged
+
+    from_edits = notes_edits is not None
+    if from_edits:
+        # Patching needs the note as it stands, and Redmine serves no endpoint
+        # for a single journal -- `GET /issues/:id?include=journals` is the
+        # only way to read one. Hence the extra id, asked for only here (#317).
+        if issue_id is None:
+            return {
+                "error": (
+                    "notes_edits needs issue_id as well: patching reads the "
+                    "note first, and Redmine offers no endpoint for a single "
+                    "journal -- it can only be read through its issue."
+                )
+            }
+        try:
+            issue = _get_redmine_client().issue.get(issue_id, include="journals")
+        except Exception as exc:  # noqa: BLE001 - surfaced as an error dict
+            return _handle_redmine_error(
+                exc,
+                f"reading issue {issue_id} to patch journal {journal_id}",
+                {"resource_type": "issue", "resource_id": issue_id},
+            )
+
+        current = None
+        for journal in getattr(issue, "journals", None) or []:
+            if getattr(journal, "id", None) == journal_id:
+                current = getattr(journal, "notes", "") or ""
+                break
+        if current is None:
+            # Covers "no such journal" and "not on this issue" alike, and
+            # deliberately does not claim the journal does not exist: a
+            # private note is absent from this response entirely without the
+            # "View private notes" permission, so a real id can still be
+            # missing here.
+            return {
+                "error": (
+                    f"Journal {journal_id} is not among the journals of issue "
+                    f"{issue_id} that are visible to you, so nothing was "
+                    "changed. Check that both ids belong together -- and note "
+                    "that a private note does not appear at all without the "
+                    "'View private notes' permission, so a journal that "
+                    "exists can still be unreachable here."
+                )
+            }
+
+        patched, patch_error = _apply_text_edits(
+            current, notes_edits, notes_expected_sha256, "notes"
+        )
+        if patch_error is not None:
+            return patch_error
+        notes = patched
+
     try:
         params: Dict[str, Any] = {"notes": notes}
         if private_notes is not None:
             params["private_notes"] = bool(private_notes)
         _get_redmine_client().issue_journal.update(journal_id, **params)
-        return {
+        result: Dict[str, Any] = {
             "success": True,
             "journal_id": journal_id,
-            "notes": notes,
             "private_notes": (
                 bool(private_notes) if private_notes is not None else None
             ),
         }
+        if from_upload or from_edits:
+            # A note that arrived as a file, or was changed in place, is one
+            # the caller never wrote out,
+            # so echoing it back would put the whole thing in the conversation
+            # after all -- the cost this route exists to avoid (#317).
+            result["notes_length"] = len(notes)
+            result["notes_sha256"] = hashlib.sha256(notes.encode("utf-8")).hexdigest()
+        else:
+            result["notes"] = notes
+        return result
     except Exception as e:
         return _handle_redmine_error(
             e,
@@ -2978,6 +3414,10 @@ async def manage_issue_note(
     notes: Optional[str] = None,
     private_notes: Optional[bool] = None,
     is_private: Optional[bool] = None,
+    notes_upload_id: Optional[str] = None,
+    notes_edits: Optional[List[Dict[str, str]]] = None,
+    notes_expected_sha256: Optional[str] = None,
+    issue_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Edit text or toggle privacy of a Redmine journal (issue note).
 
@@ -2986,15 +3426,47 @@ async def manage_issue_note(
     Args:
         action: One of: ``edit``, ``set_private``.
         journal_id: ID of the journal entry (required for both actions).
-        notes: New notes text for ``edit`` (required; may be empty string
-            to clear the note).
+        notes: New notes text for ``edit``; may be an empty string to clear
+            the note. Mutually exclusive with ``notes_upload_id``, and one
+            of the two is required.
+        notes_upload_id: Take the new note from a file staged with
+            ``create_upload_ticket``, decoded as UTF-8. **Prefer this for a
+            long note**: the text travels from disk to this server instead
+            of being written out into this argument, which is slow for a
+            long one and drops characters. The response then reports
+            ``notes_length`` and ``notes_sha256`` rather than echoing the
+            note back, since echoing it would put the whole thing in the
+            conversation after all.
+        notes_edits: Change part of a long note in place instead of
+            sending the whole thing: a list of ``{"find": ..., "replace":
+            ...}``, applied in order on this server. Each ``find`` must
+            occur exactly once in the note as it stands after the preceding
+            edits; zero matches or several refuse the whole call and change
+            nothing. Requires ``issue_id``, and is mutually exclusive with
+            ``notes`` and ``notes_upload_id``.
+        notes_expected_sha256: The hex digest the note had when it was read
+            -- echo back the ``notes_sha256`` that ``get_redmine_issue``
+            and ``get_private_notes`` report on each journal; do not hash
+            the ``notes`` you read, since they are wrapped in boundary tags
+            whose id changes on every call. Checked before any edit is
+            applied, and a mismatch refuses the call instead of overwriting
+            whatever changed in between.
+        issue_id: The issue the journal belongs to. **Required with
+            ``notes_edits`` and ignored otherwise**: patching reads the note
+            first, and Redmine offers no endpoint for a single journal, so
+            it can only be read through its issue. A ``journal_id`` that is
+            not among that issue's visible journals is refused and nothing
+            is written.
         private_notes: Optionally toggle private flag during ``edit``.
         is_private: Required for ``set_private`` -- ``True`` to mark
             private, ``False`` to make public.
 
     Returns:
         ``edit``: ``{"success": True, "journal_id": ..., "notes": ...,
-        "private_notes": ...}``.
+        "private_notes": ...}``, or with ``notes_upload_id`` or
+        ``notes_edits``
+        ``{"success": True, "journal_id": ..., "notes_length": ...,
+        "notes_sha256": ..., "private_notes": ...}``.
         ``set_private``: ``{"success": True, "journal_id": ...,
         "private_notes": <bool>}``.
         On error: ``{"error": "..."}``.
