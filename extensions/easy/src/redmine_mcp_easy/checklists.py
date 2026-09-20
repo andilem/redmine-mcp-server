@@ -30,15 +30,20 @@ import logging
 from typing import Any, Dict, List, Optional, Union
 
 from redminelib.exceptions import ForbiddenError
-
-from .._decorators import ActionMode, action_dispatch
-from .._easy_api import as_dict, describe, easy_request
-from .._env import _is_easy_enabled, _is_read_only_mode
-from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
-from .._offload import in_thread, offloaded
-from .._serialization import wrap_insecure_content
-from .._validation import _is_positive_int
-from ..server import mcp
+from redmine_mcp_server.extensions import (
+    ActionMode,
+    READ_ONLY_ERROR,
+    action_dispatch,
+    handle_redmine_error,
+    in_thread,
+    is_positive_int,
+    is_read_only_mode,
+    mcp,
+    offloaded,
+    plugin_tag,
+    wrap_insecure_content,
+)
+from ._api import as_dict, describe, easy_request
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +75,7 @@ def _module_missing_on(issue_id: Optional[int]) -> bool:
     disabled module sends an operator to switch on something that may
     already be on.
     """
-    if not _is_positive_int(issue_id):
+    if not is_positive_int(issue_id):
         return False
     try:
         payload = easy_request("get", f"issues/{issue_id}.json")
@@ -209,7 +214,7 @@ def _normalize_items(items: Any) -> Union[List[Dict[str, Any]], str]:
         if "done" in item:
             entry["done"] = bool(item["done"])
         if item.get("id") is not None:
-            if not _is_positive_int(item["id"]):
+            if not is_positive_int(item["id"]):
                 return f"items[{index}].id must be a positive integer."
             entry["id"] = item["id"]
         if item.get("position") is not None:
@@ -249,9 +254,9 @@ async def list_easy_checklists(
     """
     if (issue_id is None) == (checklist_id is None):
         return {"error": "Pass exactly one of issue_id and checklist_id."}
-    if issue_id is not None and not _is_positive_int(issue_id):
+    if issue_id is not None and not is_positive_int(issue_id):
         return {"error": "issue_id must be a positive integer."}
-    if checklist_id is not None and not _is_positive_int(checklist_id):
+    if checklist_id is not None and not is_positive_int(checklist_id):
         return {"error": "checklist_id must be a positive integer."}
 
     def _run() -> Dict[str, Any]:
@@ -259,7 +264,7 @@ async def list_easy_checklists(
             try:
                 checklist = _read_checklist(checklist_id)
             except Exception as exc:
-                return _handle_redmine_error(exc, "reading an Easy Redmine checklist")
+                return handle_redmine_error(exc, "reading an Easy Redmine checklist")
             return {"checklists": [checklist] if checklist else []}
 
         try:
@@ -267,7 +272,7 @@ async def list_easy_checklists(
                 "get", f"issues/{issue_id}.json", params={"include": "checklists"}
             )
         except Exception as exc:
-            return _handle_redmine_error(
+            return handle_redmine_error(
                 exc, "reading an issue's Easy Redmine checklists"
             )
         return {
@@ -287,7 +292,7 @@ async def _create_checklist_action(
     **_ignored: Any,
 ) -> Dict[str, Any]:
     """POST /easy_checklists.json, which answers 201 with the record."""
-    if not _is_positive_int(issue_id):
+    if not is_positive_int(issue_id):
         return {"error": "create needs issue_id, a positive integer."}
     if not str(name or "").strip():
         return {"error": "create needs a name."}
@@ -315,9 +320,9 @@ async def _create_checklist_action(
             # do not try.
             if _module_missing_on(issue_id):
                 return _module_disabled_error(issue_id)
-            return _handle_redmine_error(exc, "creating an Easy Redmine checklist")
+            return handle_redmine_error(exc, "creating an Easy Redmine checklist")
         except Exception as exc:
-            return _handle_redmine_error(exc, "creating an Easy Redmine checklist")
+            return handle_redmine_error(exc, "creating an Easy Redmine checklist")
         record = as_dict(payload).get("easy_checklist")
         if not as_dict(record).get("id"):
             return {
@@ -343,7 +348,7 @@ async def _update_checklist_action(
     **_ignored: Any,
 ) -> Dict[str, Any]:
     """PUT /easy_checklists/{id}.json, then read the checklist back."""
-    if not _is_positive_int(checklist_id):
+    if not is_positive_int(checklist_id):
         return {"error": "update needs checklist_id, a positive integer."}
 
     body: Dict[str, Any] = {}
@@ -373,11 +378,11 @@ async def _update_checklist_action(
                 data={"easy_checklist": body},
             )
         except Exception as exc:
-            return _handle_redmine_error(exc, "updating an Easy Redmine checklist")
+            return handle_redmine_error(exc, "updating an Easy Redmine checklist")
         try:
             checklist = _read_checklist(checklist_id)
         except Exception as exc:
-            return _handle_redmine_error(
+            return handle_redmine_error(
                 exc, "reading back the updated Easy Redmine checklist"
             )
         return {"checklist": checklist, "updated": True}
@@ -443,7 +448,7 @@ async def _create_item_action(
     **_ignored: Any,
 ) -> Dict[str, Any]:
     """POST /easy_checklist_items.json."""
-    if not _is_positive_int(checklist_id):
+    if not is_positive_int(checklist_id):
         return {"error": "create needs checklist_id, a positive integer."}
     if not str(subject or "").strip():
         return {"error": "create needs a subject."}
@@ -464,7 +469,7 @@ async def _create_item_action(
                 data={"easy_checklist_item": body},
             )
         except Exception as exc:
-            return _handle_redmine_error(exc, "creating an Easy Redmine checklist item")
+            return handle_redmine_error(exc, "creating an Easy Redmine checklist item")
         return _with_checklist(checklist_id, "created")
 
     return await in_thread(_run)
@@ -479,7 +484,7 @@ async def _update_item_action(
     **_ignored: Any,
 ) -> Dict[str, Any]:
     """PUT /easy_checklist_items/{id}.json."""
-    if not _is_positive_int(item_id):
+    if not is_positive_int(item_id):
         return {"error": "update needs item_id, a positive integer."}
 
     body: Dict[str, Any] = {}
@@ -502,7 +507,7 @@ async def _update_item_action(
                 data={"easy_checklist_item": body},
             )
         except Exception as exc:
-            return _handle_redmine_error(exc, "updating an Easy Redmine checklist item")
+            return handle_redmine_error(exc, "updating an Easy Redmine checklist item")
         # The item's own answer names its checklist, which is how the whole
         # list can be reported back without the caller having to say where
         # the item lives.
@@ -523,7 +528,7 @@ def _with_checklist(checklist_id: Optional[int], verb: str) -> Dict[str, Any]:
     write already happened.
     """
     result: Dict[str, Any] = {verb: True}
-    if not _is_positive_int(checklist_id):
+    if not is_positive_int(checklist_id):
         return result
     try:
         checklist = _read_checklist(checklist_id)
@@ -617,18 +622,18 @@ def delete_easy_checklist(
         ``item_id`` cannot preview the entry's text. Read the list with
         ``list_easy_checklists`` first if that matters.
     """
-    if _is_read_only_mode():
-        return dict(_READ_ONLY_ERROR)
+    if is_read_only_mode():
+        return dict(READ_ONLY_ERROR)
     if (checklist_id is None) == (item_id is None):
         return {"error": "Pass exactly one of checklist_id and item_id."}
 
     if checklist_id is not None:
-        if not _is_positive_int(checklist_id):
+        if not is_positive_int(checklist_id):
             return {"error": "checklist_id must be a positive integer."}
         try:
             checklist = _read_checklist(checklist_id)
         except Exception as exc:
-            return _handle_redmine_error(exc, "reading the Easy Redmine checklist")
+            return handle_redmine_error(exc, "reading the Easy Redmine checklist")
         if checklist is None:
             return {
                 "error": f"Checklist {checklist_id} does not exist.",
@@ -649,10 +654,10 @@ def delete_easy_checklist(
         try:
             easy_request("delete", f"easy_checklists/{checklist_id}.json")
         except Exception as exc:
-            return _handle_redmine_error(exc, "deleting the Easy Redmine checklist")
+            return handle_redmine_error(exc, "deleting the Easy Redmine checklist")
         return {"deleted": True, "checklist_id": checklist_id, "checklist": checklist}
 
-    if not _is_positive_int(item_id):
+    if not is_positive_int(item_id):
         return {"error": "item_id must be a positive integer."}
     if not confirm_delete:
         return {
@@ -669,14 +674,18 @@ def delete_easy_checklist(
     try:
         easy_request("delete", f"easy_checklist_items/{item_id}.json")
     except Exception as exc:
-        return _handle_redmine_error(exc, "deleting the Easy Redmine checklist item")
+        return handle_redmine_error(exc, "deleting the Easy Redmine checklist item")
     return {"deleted": True, "item_id": item_id}
 
 
-# Registered on the MCP surface only when Easy Redmine support is on, the
-# same shape as the sprint and attendance tools.
-if _is_easy_enabled():
-    list_easy_checklists = mcp.tool()(list_easy_checklists)
-    manage_easy_checklist = mcp.tool()(manage_easy_checklist)
-    manage_easy_checklist_item = mcp.tool()(manage_easy_checklist_item)
-    delete_easy_checklist = mcp.tool()(delete_easy_checklist)
+# Registered unconditionally and tagged: the family's `enabled`
+# callable in the ExtensionSpec is what hides these when
+# REDMINE_EASY_ENABLED is off. Decorating at the bottom rather than
+# at each `def` keeps the tool's own signature readable, and the
+# annotations are read out of TOOL_KINDS here either way.
+list_easy_checklists = mcp.tool(tags={plugin_tag("easy")})(list_easy_checklists)
+manage_easy_checklist = mcp.tool(tags={plugin_tag("easy")})(manage_easy_checklist)
+manage_easy_checklist_item = mcp.tool(tags={plugin_tag("easy")})(
+    manage_easy_checklist_item
+)
+delete_easy_checklist = mcp.tool(tags={plugin_tag("easy")})(delete_easy_checklist)

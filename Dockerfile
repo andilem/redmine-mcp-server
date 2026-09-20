@@ -16,14 +16,21 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
 COPY README.md ./
+COPY extensions/ ./extensions/
 
-# Install dependencies and the project in a virtual environment.
-# The `easy` extra pulls in PyMySQL, which list_easy_sprints needs: Easy
-# Redmine serves no sprint endpoint, so sprint names come from the
-# database. Pure Python and tiny, so it costs nothing on a deployment
-# that leaves REDMINE_EASY_ENABLED off.
+# Install the server, then the Easy Redmine extension on top of it. The
+# extension is a separate distribution that registers itself through
+# REDMINE_MCP_EXTENSIONS instead of patching this tree, so it brings its own
+# pyproject and its own PyMySQL extra -- only list_easy_sprints needs a
+# database, and a deployment that leaves the family off pays for none of it.
+#
+# --no-deps on the second call is deliberate: the extension depends on
+# redmine-mcp-server, and resolving that would fetch the published release
+# over the copy just installed from this tree.
 RUN uv venv /opt/venv && \
-    uv pip install ".[easy]" --python=/opt/venv/bin/python
+    uv pip install "." --python=/opt/venv/bin/python && \
+    uv pip install --no-deps "./extensions/easy" --python=/opt/venv/bin/python && \
+    uv pip install "PyMySQL>=1.1,<2" --python=/opt/venv/bin/python
 
 # Production stage
 FROM python:3.13-slim AS runtime

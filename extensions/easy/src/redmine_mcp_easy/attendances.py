@@ -37,15 +37,20 @@ from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import Field
 from redminelib.exceptions import ResourceNotFoundError
-
-from .._decorators import ActionMode, action_dispatch
-from .._easy_api import as_dict, describe, easy_request, first_list
-from .._env import _is_easy_enabled, _is_read_only_mode
-from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
-from .._offload import in_thread, offloaded
-from .._serialization import wrap_insecure_content
-from .._validation import _is_positive_int
-from ..server import mcp
+from redmine_mcp_server.extensions import (
+    ActionMode,
+    READ_ONLY_ERROR,
+    action_dispatch,
+    handle_redmine_error,
+    in_thread,
+    is_positive_int,
+    is_read_only_mode,
+    mcp,
+    offloaded,
+    plugin_tag,
+    wrap_insecure_content,
+)
+from ._api import as_dict, describe, easy_request, first_list
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +253,7 @@ async def list_easy_attendances(
         Attendance is not the same as spent time. Use ``list_time_entries``
         for hours booked against issues.
     """
-    if user_id is not None and not _is_positive_int(user_id):
+    if user_id is not None and not is_positive_int(user_id):
         return {"error": "user_id must be a positive integer."}
     for name, value in (("from_date", from_date), ("to_date", to_date)):
         if not _valid_date(value):
@@ -289,7 +294,7 @@ async def list_easy_attendances(
             try:
                 payload = easy_request("get", "easy_attendances.json", params=params)
             except Exception as exc:
-                return _handle_redmine_error(exc, "listing Easy Redmine attendances")
+                return handle_redmine_error(exc, "listing Easy Redmine attendances")
 
             rows = _rows_of(payload)
             if not rows:
@@ -405,7 +410,7 @@ async def _create_attendance_action(
             if activities:
                 refusal["activities"] = activities
         return refusal
-    if not _is_positive_int(user_id) or not _is_positive_int(activity_id):
+    if not is_positive_int(user_id) or not is_positive_int(activity_id):
         return {"error": "user_id and activity_id must be positive integers."}
 
     body: Dict[str, Any] = {
@@ -424,7 +429,7 @@ async def _create_attendance_action(
                 "post", "easy_attendances.json", data={"easy_attendance": body}
             )
         except Exception as exc:
-            return _handle_redmine_error(exc, "creating an Easy Redmine attendance")
+            return handle_redmine_error(exc, "creating an Easy Redmine attendance")
         record = as_dict(payload).get("easy_attendance")
         if not as_dict(record).get("id"):
             return {
@@ -457,7 +462,7 @@ async def _update_attendance_action(
     The PUT answers 200 with no promised body, so the result reported here
     is a fresh read rather than an echo of what was sent.
     """
-    if not _is_positive_int(attendance_id):
+    if not is_positive_int(attendance_id):
         return {"error": "update needs attendance_id, a positive integer."}
 
     body: Dict[str, Any] = {}
@@ -484,12 +489,12 @@ async def _update_attendance_action(
         try:
             easy_request("put", path, data={"easy_attendance": body})
         except Exception as exc:
-            return _handle_redmine_error(exc, "updating an Easy Redmine attendance")
+            return handle_redmine_error(exc, "updating an Easy Redmine attendance")
         try:
             payload = easy_request("get", path)
         except Exception as exc:
             logger.warning("Attendance %s updated but not readable", attendance_id)
-            return _handle_redmine_error(
+            return handle_redmine_error(
                 exc, "reading back the updated Easy Redmine attendance"
             )
         record = as_dict(payload).get("easy_attendance")
@@ -574,16 +579,16 @@ def delete_easy_attendance(
 
         Blocked in read-only mode (``REDMINE_MCP_READ_ONLY=true``).
     """
-    if _is_read_only_mode():
-        return dict(_READ_ONLY_ERROR)
-    if not _is_positive_int(attendance_id):
+    if is_read_only_mode():
+        return dict(READ_ONLY_ERROR)
+    if not is_positive_int(attendance_id):
         return {"error": "attendance_id must be a positive integer."}
 
     path = f"easy_attendances/{attendance_id}.json"
     try:
         payload = easy_request("get", path)
     except Exception as exc:
-        return _handle_redmine_error(exc, "reading the Easy Redmine attendance")
+        return handle_redmine_error(exc, "reading the Easy Redmine attendance")
     record = _attendance_to_dict(as_dict(payload).get("easy_attendance"))
 
     if not confirm_delete:
@@ -599,7 +604,7 @@ def delete_easy_attendance(
     try:
         easy_request("delete", path)
     except Exception as exc:
-        return _handle_redmine_error(exc, "deleting the Easy Redmine attendance")
+        return handle_redmine_error(exc, "deleting the Easy Redmine attendance")
     return {"deleted": True, "attendance_id": attendance_id, "attendance": record}
 
 
@@ -640,10 +645,10 @@ def approve_easy_attendances(
         ``_DECISION_STATUS``; until an operator fills it in, the tool
         refuses rather than sending a number nobody verified.
     """
-    if _is_read_only_mode():
-        return dict(_READ_ONLY_ERROR)
+    if is_read_only_mode():
+        return dict(READ_ONLY_ERROR)
 
-    ids = [i for i in (attendance_ids or []) if _is_positive_int(i)]
+    ids = [i for i in (attendance_ids or []) if is_positive_int(i)]
     if not ids or len(ids) != len(attendance_ids or []):
         return {"error": "attendance_ids must be a list of positive integers."}
     if len(ids) > 50:
@@ -678,7 +683,7 @@ def approve_easy_attendances(
                 "code": "NOT_FOUND",
             }
         except Exception as exc:
-            return _handle_redmine_error(exc, "reading attendances before approval")
+            return handle_redmine_error(exc, "reading attendances before approval")
         before[attendance_id] = as_dict(as_dict(payload).get("easy_attendance")).get(
             "approval_status"
         )
@@ -690,7 +695,7 @@ def approve_easy_attendances(
             data={"ids": ids, "approval_status": target},
         )
     except Exception as exc:
-        return _handle_redmine_error(exc, "approving Easy Redmine attendances")
+        return handle_redmine_error(exc, "approving Easy Redmine attendances")
 
     results: List[Dict[str, Any]] = []
     for attendance_id in ids:
@@ -728,11 +733,12 @@ def approve_easy_attendances(
     return result
 
 
-# Registered on the MCP surface only when Easy Redmine support is on, the
-# same shape as list_easy_sprints. A stock Redmine serves none of these
-# endpoints.
-if _is_easy_enabled():
-    list_easy_attendances = mcp.tool()(list_easy_attendances)
-    manage_easy_attendance = mcp.tool()(manage_easy_attendance)
-    delete_easy_attendance = mcp.tool()(delete_easy_attendance)
-    approve_easy_attendances = mcp.tool()(approve_easy_attendances)
+# Registered unconditionally and tagged: the family's `enabled`
+# callable in the ExtensionSpec is what hides these when
+# REDMINE_EASY_ENABLED is off. Decorating at the bottom rather than
+# at each `def` keeps the tool's own signature readable, and the
+# annotations are read out of TOOL_KINDS here either way.
+list_easy_attendances = mcp.tool(tags={plugin_tag("easy")})(list_easy_attendances)
+manage_easy_attendance = mcp.tool(tags={plugin_tag("easy")})(manage_easy_attendance)
+delete_easy_attendance = mcp.tool(tags={plugin_tag("easy")})(delete_easy_attendance)
+approve_easy_attendances = mcp.tool(tags={plugin_tag("easy")})(approve_easy_attendances)

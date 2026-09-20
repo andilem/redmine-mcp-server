@@ -6,7 +6,7 @@ on. The engine underneath is usable directly, though, and going through it
 rather than through ``requests`` keeps everything that matters: the session
 with the caller's API key or bearer token, the configured timeout, the SSL
 settings, the redirect warning, and -- most usefully -- the mapping from
-HTTP status to the ``redminelib`` exceptions that ``_handle_redmine_error``
+HTTP status to the ``redminelib`` exceptions that ``handle_redmine_error``
 already knows how to phrase.
 
 Two rough edges of that engine are smoothed here:
@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 
 from redminelib.exceptions import ValidationError
 
-from ._client import _get_redmine_client
+from redmine_mcp_server.extensions import get_redmine_client
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def easy_request(
             ``ForbiddenError`` (403), ``ResourceNotFoundError`` (404),
             ``ValidationError`` (422), ``ServerError`` (500).
     """
-    client = _get_redmine_client()
+    client = get_redmine_client()
     url = f"{str(client.url).rstrip('/')}/{path.lstrip('/')}"
 
     try:

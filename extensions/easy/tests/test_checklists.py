@@ -11,8 +11,8 @@ from unittest.mock import patch
 import pytest
 from redminelib.exceptions import ForbiddenError, ResourceNotFoundError
 
-from redmine_mcp_server.tools import easy_checklists as cl_mod
-from redmine_mcp_server.tools.easy_checklists import (
+from redmine_mcp_easy import checklists as cl_mod
+from redmine_mcp_easy.checklists import (
     _checklist_to_dict,
     _normalize_items,
     delete_easy_checklist,
@@ -455,7 +455,7 @@ class TestDelete:
 
     @pytest.mark.asyncio
     async def test_read_only_mode_blocks_it(self):
-        with patch.object(cl_mod, "_is_read_only_mode", return_value=True):
+        with patch.object(cl_mod, "is_read_only_mode", return_value=True):
             with patch.object(cl_mod, "easy_request") as request:
                 result = await delete_easy_checklist(
                     checklist_id=7, confirm_delete=True
@@ -465,9 +465,9 @@ class TestDelete:
 
 
 class TestRegistration:
-    def test_the_tools_are_mapped_even_though_they_register_conditionally(self):
+    def test_the_tools_are_mapped_and_the_family_owns_a_flag(self):
         from redmine_mcp_server._annotations import TOOL_KINDS
-        from redmine_mcp_server._tool_allow_list import CONDITIONALLY_REGISTERED
+        from redmine_mcp_server._plugin_visibility import PLUGIN_FLAGS
         from redmine_mcp_server.oauth_scopes import TOOL_SCOPES
 
         for name in (
@@ -478,7 +478,7 @@ class TestRegistration:
         ):
             assert name in TOOL_SCOPES
             assert name in TOOL_KINDS
-            assert name in CONDITIONALLY_REGISTERED
+            assert "easy" in PLUGIN_FLAGS
 
     def test_the_names_do_not_collide_with_the_redmineup_plugin(self):
         """Different feature, different endpoints, same English word."""

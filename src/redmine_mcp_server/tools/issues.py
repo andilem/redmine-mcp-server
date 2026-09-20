@@ -30,12 +30,7 @@ from .._custom_fields import (
     _parse_optional_object_payload,
 )
 from .._decorators import ActionMode, action_dispatch
-from .._env import (
-    _is_agile_enabled,
-    _is_easy_enabled,
-    _is_read_only_mode,
-    _is_tags_enabled,
-)
+from .._env import _is_agile_enabled, _is_read_only_mode, _is_tags_enabled
 from .._errors import _READ_ONLY_ERROR, _handle_redmine_error
 from .._extension_registry import extension_issue_query_filters
 from .._offload import in_thread, offloaded
@@ -330,17 +325,6 @@ _ISSUE_REQUEST_PARAM_KEYS = frozenset(
 )
 _ISSUE_WINDOW_KEYS = ("limit", "offset")
 
-# Easy Redmine's writable issue attributes, from IssueApiRequest in the
-# instance's own /easy_swagger.json. They go through the normal issue update.
-_EASY_WRITABLE_KEYS = ("easy_sprint_id", "easy_story_points", "target_backlog")
-
-# Easy Redmine's EasyIssueQuery registers filters that stock Redmine does not.
-# Only the ones verified against a live instance belong here: an unregistered
-# name is dropped by Redmine, which answers 200 with the collection
-# unnarrowed, and a caller cannot tell that from a filter that matched
-# everything.
-_EASY_QUERY_FILTER_NAMES = frozenset({"easy_sprint_id"})
-
 
 def _reject_issue_filters(filters: Any) -> Optional[str]:
     """Return an error message if ``filters`` is not safe to forward.
@@ -364,19 +348,15 @@ def _reject_issue_filters(filters: Any) -> Optional[str]:
     )
     if reserved:
         return reserved
-    # Two ways in, deliberately both. Upstream's `ExtensionSpec` registry is
-    # the general one; our Easy family predates it, lives in this tree and is
-    # switched by `REDMINE_EASY_ENABLED` rather than registered, so its names
-    # still have to be added by hand. Dropping either side would silently
-    # un-narrow a query: Redmine answers 200 with the whole collection for a
-    # filter it does not know, which reads exactly like one that matched
-    # everything. Widening the list rather than opening it is the point.
-    known_names = _ISSUE_QUERY_FILTER_NAMES | frozenset(extension_issue_query_filters())
-    if _is_easy_enabled():
-        known_names = known_names | _EASY_QUERY_FILTER_NAMES
+    # A registered extension's filters join the accepted names while its
+    # family is enabled. Widening the list rather than opening it keeps what
+    # the check is for: Redmine drops a filter it does not know and answers
+    # 200 with the collection unnarrowed, which reads exactly like a filter
+    # that matched everything.
+    registered = _ISSUE_QUERY_FILTER_NAMES | frozenset(extension_issue_query_filters())
     unregistered = _reject_unregistered_filter_keys(
         {k: v for k, v in filters.items() if k not in _ISSUE_REQUEST_PARAM_KEYS},
-        known_names,
+        registered,
         _ISSUE_QUERY_ASSOCIATIONS,
     )
     if unregistered:
@@ -453,57 +433,6 @@ def _hydrate_search_results(search_results: List[Any]) -> List[Any]:
         hydrated_by_id.get(getattr(issue, "id", None), issue)
         for issue in search_results
     ]
-
-
-def _easy_sprint_to_dict(raw: Any) -> Optional[Dict[str, Any]]:
-    """Normalize the ``easy_sprint`` payload to ``{id, name, due_date}``.
-
-    Easy Redmine sends it as a nested object on every issue, with no
-    ``include`` needed. python-redmine has no resource class for it, so what
-    arrives is either a plain dict or an attribute bag depending on the call
-    path; read both rather than betting on one.
-    """
-    if raw is None:
-        return None
-
-    def read(key: str) -> Any:
-        if isinstance(raw, dict):
-            return raw.get(key)
-        return getattr(raw, key, None)
-
-    sprint_id = read("id")
-    if sprint_id is None:
-        return None
-    return {
-        "id": sprint_id,
-        "name": read("name"),
-        "due_date": _safe_isoformat(read("due_date")) or read("due_date"),
-    }
-
-
-# Easy Redmine's top-level issue keys that `_easy_issue_fields` serializes
-# itself. Named once because `_issue_unmapped_fields` has to skip exactly
-# these when the flag is on, or they would be reported twice.
-_EASY_ISSUE_FIELD_NAMES = frozenset(
-    {"easy_sprint", "easy_sprint_phase", "easy_sprint_position", "easy_story_points"}
-)
-
-
-def _easy_issue_fields(issue: Any) -> Dict[str, Any]:
-    """Easy Redmine's issue attributes, or ``{}`` when the flag is off.
-
-    Kept out of the response by default: on a stock Redmine none of these
-    exist, and emitting a wall of ``None`` would suggest the server had asked
-    for something it did not.
-    """
-    if not _is_easy_enabled():
-        return {}
-    fields: Dict[str, Any] = {
-        "easy_sprint": _easy_sprint_to_dict(getattr(issue, "easy_sprint", None))
-    }
-    for name in sorted(_EASY_ISSUE_FIELD_NAMES - {"easy_sprint"}):
-        fields[name] = getattr(issue, name, None)
-    return fields
 
 
 # Top-level keys of an issue payload that `_issue_to_dict` serializes itself.
@@ -629,12 +558,6 @@ def _issue_unmapped_fields(issue: Any) -> Dict[str, Any]:
         # (`_issue_tags_to_list`); with it disabled the key is just another
         # unmapped plugin field.
         skip = skip | {"tags"}
-    if _is_easy_enabled():
-        # Same reason as `tags`: with the flag on these carry their own
-        # serializer (`_easy_issue_fields`), so passing them through as well
-        # would report them twice. With it off they are ordinary unmapped
-        # plugin fields, which is what this function is for.
-        skip = skip | _EASY_ISSUE_FIELD_NAMES
 
     unmapped: Dict[str, Any] = {}
     for key, value in payload.items():
@@ -725,8 +648,6 @@ def _issue_to_dict(
         "updated_on": _safe_isoformat(getattr(issue, "updated_on", None)),
     }
 
-    issue_dict.update(_easy_issue_fields(issue))
-
     if include_custom_fields:
         issue_dict["custom_fields"] = _custom_fields_to_list(issue)
     if include_relations:
@@ -792,14 +713,6 @@ def _issue_to_dict_selective(
           define (added by a distribution or plugin, e.g. Easy Redmine's
           ``easy_sprint``), as Redmine sent them. Omitted when there are
           none, also from the "all fields" result.
-
-    Available only when ``REDMINE_EASY_ENABLED=true``; naming one of these on
-    a stock Redmine selects nothing:
-        - easy_sprint: the issue's Easy Redmine sprint
-          ({id, name, due_date}, or None when it is in no sprint)
-        - easy_sprint_phase: phase within the sprint (int, or None)
-        - easy_sprint_position: position on the sprint board (int, or None)
-        - easy_story_points: story points (str, or None)
 
     Returns:
         Dictionary containing only the requested fields.
@@ -889,7 +802,6 @@ def _issue_to_dict_selective(
         "created_on": _safe_isoformat(getattr(issue, "created_on", None)),
         "updated_on": _safe_isoformat(getattr(issue, "updated_on", None)),
     }
-    all_fields.update(_easy_issue_fields(issue))
 
     # A flag means the same thing here as in _issue_to_dict: add the key.
     # Without this, combining a flag with a narrowed `fields` would request the
@@ -1558,19 +1470,11 @@ async def list_redmine_issues(
             if filters:
                 redmine_api_filters.update(filters)
 
-            # The companion parameter, from both sides of the check above.
-            # Easy Redmine replaces Redmine's filter handling with Easy Query,
-            # which engages on `set_filter`. Redmine itself builds an API
-            # query from the parameters either way (`api_request?` takes the
-            # same branch), so this is inert on a stock server -- but it is
-            # only sent when an Easy filter is actually present, to keep the
-            # stock request byte-identical to what it was.
-            if any(key in redmine_api_filters for key in _EASY_QUERY_FILTER_NAMES):
-                redmine_api_filters.setdefault("set_filter", 1)
-
-            # The same thing for a family that came in through the registry:
-            # merged only when that filter is in this call, and never over a
-            # value the caller set.
+            # A registered extension's filter can need a companion parameter
+            # to be honoured at all -- Easy Redmine's set_filter=1 is what
+            # engages its query engine. Merged only when that filter is in
+            # this call, and never over a value the caller set, so a request
+            # naming none of them goes out exactly as it does today.
             for name, params in extension_issue_query_filters().items():
                 if name not in redmine_api_filters:
                     continue
@@ -2579,14 +2483,6 @@ async def update_redmine_issue(
     # Extract tag_list (additional_tags plugin) before custom-field resolution
     # so it is never mistaken for a same-named custom field. Explicit key
     # presence check so tag_list=[] (clear all tags) still triggers the update.
-    # Easy Redmine attributes ride the standard update (they are part of
-    # IssueApiRequest, not a separate endpoint), so nothing has to be routed --
-    # they only have to be dropped when the flag is off, or a stock Redmine
-    # would be sent attributes it does not have.
-    if not _is_easy_enabled():
-        for key in _EASY_WRITABLE_KEYS:
-            update_fields.pop(key, None)
-
     tag_list = None
     tags_update_needed = False
     if _is_tags_enabled():

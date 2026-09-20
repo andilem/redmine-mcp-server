@@ -447,23 +447,6 @@ TOOL_SCOPES: Dict[str, ToolScopeEntry] = {
     # Local attachment-store maintenance; no Redmine call. Registered
     # only when REDMINE_MCP_EXPOSE_ADMIN_TOOLS is truthy.
     "cleanup_attachment_files": frozenset(),
-    # --- Easy Redmine (registered only when REDMINE_EASY_ENABLED is truthy)
-    # Easy's plugins ship no public permission list, so there is no name to
-    # map these onto: a guessed one would either deny every call or gate on
-    # something that does not exist. They are mapped as scope-free, which
-    # means token scopes do not narrow them and Redmine's own server-side
-    # permissions are what stands. Leaving them unmapped instead would be
-    # worse -- the middleware denies unmapped tools outright, so these would
-    # be dead under enforcement rather than merely ungated.
-    "list_easy_sprints": frozenset(),
-    "list_easy_attendances": frozenset(),
-    "manage_easy_attendance": frozenset(),
-    "delete_easy_attendance": frozenset(),
-    "approve_easy_attendances": frozenset(),
-    "list_easy_checklists": frozenset(),
-    "manage_easy_checklist": frozenset(),
-    "manage_easy_checklist_item": frozenset(),
-    "delete_easy_checklist": frozenset(),
     # --- documents ---
     "manage_document": {
         "list": frozenset({"view_documents"}),

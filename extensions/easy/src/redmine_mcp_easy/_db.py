@@ -16,7 +16,7 @@ and it is kept as narrow as an exception should be:
   not help against that, because reading is the whole problem.
 - **The caller scopes the result.** A database read bypasses Redmine's
   authorization completely, so this layer returns rows and
-  :mod:`.tools.easy_sprints` decides which of them the caller may see,
+  :mod:`.sprints` decides which of them the caller may see,
   using the caller's own API key.
 - **The session is READ ONLY.** Set on connect, so credentials that turn
   out to be writable still cannot write through here.
@@ -29,7 +29,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 
-from ._serialization import wrap_insecure_content
+from redmine_mcp_server.extensions import wrap_insecure_content
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ def _select(sql: str, params: Sequence[Any]) -> List[Dict[str, Any]]:
         raise RuntimeError(
             "Sprint lookups need the PyMySQL driver, which is an optional "
             "dependency. Install the package with its 'easy' extra "
-            "(pip install 'redmine-mcp-server[easy]')."
+            "(pip install 'redmine-mcp-easy[mysql]')."
         ) from exc
 
     connection = pymysql.connect(cursorclass=DictCursor, **_connection_params())

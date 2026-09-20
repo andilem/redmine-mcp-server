@@ -50,11 +50,17 @@ services:
       AUTO_CLEANUP_ENABLED: "true"
       CLEANUP_INTERVAL_MINUTES: "10"
 
+      # Easy Redmine liegt nicht mehr im Server, sondern als eigenes Paket
+      # unter extensions/easy. Der Server importiert es beim Start; erst
+      # dann existieren die easy_*-Tools und die Issue-Attribute ueberhaupt.
+      REDMINE_MCP_EXTENSIONS: redmine_mcp_easy
+
       # Easy Redmine ist ein Fork, kein Plugin: dieselbe /issues.json traegt
       # easy_sprint & Co., und EasyIssueQuery kennt den Filter
-      # easy_sprint_id. Das Flag sagt nur, dass wir mit einem Easy sprechen.
-      # Registriert ausserdem list_easy_sprints -- damit es sichtbar wird,
-      # muss der Name auch in allowed-tools.txt stehen.
+      # easy_sprint_id. Das Flag schaltet die Familie sichtbar -- ohne es
+      # ist die Extension geladen, aber keines ihrer Tools wird gelistet.
+      # Damit ein Tool erscheint, muss sein Name auch in allowed-tools.txt
+      # stehen.
       REDMINE_EASY_ENABLED: "true"
 
       # Der read-only MySQL-DSN fuer die Sprint-Suche. Der Wert steht NICHT

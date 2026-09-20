@@ -841,13 +841,7 @@ class TestAntiDriftWithAnExtensionLoaded:
         import redmine_mcp_server.tools  # noqa: F401  triggers registration
 
         registered = {tool.name for tool in await mcp.list_tools()}
-        from redmine_mcp_server._tool_allow_list import (
-            CONDITIONALLY_REGISTERED,
-        )
-
-        # Flag-gated tools stay mapped while unregistered -- the Easy
-        # families as much as cleanup_attachment_files.
-        conditional = set(CONDITIONALLY_REGISTERED)
+        conditional = {"cleanup_attachment_files"}
 
         assert "manage_widget" in registered
         assert not registered - set(TOOL_KINDS)

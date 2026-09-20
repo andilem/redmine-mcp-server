@@ -7,15 +7,15 @@ from unittest.mock import patch
 import pytest
 from redminelib.exceptions import AuthError, ForbiddenError
 
-from redmine_mcp_server import _easy_db
-from redmine_mcp_server._easy_db import (
+from redmine_mcp_easy import _db as _easy_db
+from redmine_mcp_easy._db import (
     _connection_params,
     _row_to_sprint,
     build_sprint_query,
     is_configured,
 )
-from redmine_mcp_server._tool_allow_list import CONDITIONALLY_REGISTERED
-from redmine_mcp_server.tools import easy_sprints as sprints_mod
+from redmine_mcp_server._plugin_visibility import PLUGIN_FLAGS
+from redmine_mcp_easy import sprints as sprints_mod
 
 DSN = "mysql://reader:s3cr3t@db.internal:3307/easyredmine"
 
@@ -262,7 +262,7 @@ async def test_a_visible_sprint_comes_back_with_its_project(dsn):
     sprint = _row_to_sprint(_row())
     with patch.object(sprints_mod, "fetch_sprints", return_value=[sprint]):
         with patch.object(
-            sprints_mod, "_get_redmine_client", return_value=_client({1291})
+            sprints_mod, "get_redmine_client", return_value=_client({1291})
         ):
             result = await sprints_mod.list_easy_sprints(name="26-34")
     assert len(result["sprints"]) == 1
@@ -276,7 +276,7 @@ async def test_a_sprint_in_an_invisible_project_is_dropped(dsn):
     rows = [_row_to_sprint(_row()), _row_to_sprint(_row(id=99, project_id=4242))]
     with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
         with patch.object(
-            sprints_mod, "_get_redmine_client", return_value=_client({1291})
+            sprints_mod, "get_redmine_client", return_value=_client({1291})
         ):
             result = await sprints_mod.list_easy_sprints()
     assert [s["id"] for s in result["sprints"]] == [812]
@@ -291,7 +291,7 @@ async def test_a_cross_project_sprint_survives_an_invisible_owner(dsn):
     rows = [_row_to_sprint(_row(project_id=4242, cross_project=1))]
     with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
         with patch.object(
-            sprints_mod, "_get_redmine_client", return_value=_client(set())
+            sprints_mod, "get_redmine_client", return_value=_client(set())
         ):
             result = await sprints_mod.list_easy_sprints()
     assert [s["id"] for s in result["sprints"]] == [812]
@@ -311,7 +311,7 @@ async def test_a_broken_key_is_not_answered_as_no_sprints(dsn):
     with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
         with patch.object(
             sprints_mod,
-            "_get_redmine_client",
+            "get_redmine_client",
             return_value=SimpleNamespace(project=Projects()),
         ):
             result = await sprints_mod.list_easy_sprints()
@@ -331,7 +331,7 @@ async def test_sprints_behind_an_invisible_page_are_still_reached(dsn):
 
     with patch.object(sprints_mod, "fetch_sprints", side_effect=pages):
         with patch.object(
-            sprints_mod, "_get_redmine_client", return_value=_client({1291})
+            sprints_mod, "get_redmine_client", return_value=_client({1291})
         ):
             result = await sprints_mod.list_easy_sprints(limit=5)
     assert [s["id"] for s in result["sprints"]] == [900]
@@ -342,7 +342,7 @@ async def test_offset_counts_answered_sprints(dsn):
     rows = [_row_to_sprint(_row(id=i)) for i in (1, 2, 3)]
     with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
         with patch.object(
-            sprints_mod, "_get_redmine_client", return_value=_client({1291})
+            sprints_mod, "get_redmine_client", return_value=_client({1291})
         ):
             result = await sprints_mod.list_easy_sprints(limit=1, offset=1)
     assert [s["id"] for s in result["sprints"]] == [2]
@@ -357,7 +357,7 @@ async def test_the_walk_stops_and_says_so(dsn):
 
     with patch.object(sprints_mod, "fetch_sprints", side_effect=pages) as fetch:
         with patch.object(
-            sprints_mod, "_get_redmine_client", return_value=_client(set())
+            sprints_mod, "get_redmine_client", return_value=_client(set())
         ):
             result = await sprints_mod.list_easy_sprints()
     assert result["sprints"] == []
@@ -370,7 +370,7 @@ async def test_a_project_less_sprint_is_visible_to_everyone(dsn):
     rows = [_row_to_sprint(_row(project_id=None))]
     with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
         with patch.object(
-            sprints_mod, "_get_redmine_client", return_value=_client(set())
+            sprints_mod, "get_redmine_client", return_value=_client(set())
         ):
             result = await sprints_mod.list_easy_sprints()
     assert result["sprints"][0]["project"] is None
@@ -390,7 +390,7 @@ async def test_each_project_is_checked_once(dsn):
     with patch.object(sprints_mod, "fetch_sprints", return_value=rows):
         with patch.object(
             sprints_mod,
-            "_get_redmine_client",
+            "get_redmine_client",
             return_value=SimpleNamespace(project=Projects()),
         ):
             result = await sprints_mod.list_easy_sprints()
@@ -423,10 +423,19 @@ async def test_a_database_outage_does_not_raise_through_the_tool(dsn):
 # --- registration -------------------------------------------------------
 
 
-def test_the_tool_is_exempt_from_the_allow_list_typo_warning():
-    """It only registers under REDMINE_EASY_ENABLED, so a correct spelling
-    can legitimately be absent from the component registry."""
-    assert "list_easy_sprints" in CONDITIONALLY_REGISTERED
+def test_the_tool_needs_no_allow_list_exemption():
+    """It is registered whatever the flag says, so the component registry
+    knows the name and the typo warning has nothing to complain about.
+
+    That is the difference the extension made: in-tree the tool was defined
+    only under REDMINE_EASY_ENABLED and had to be listed as conditionally
+    registered, or a correct spelling in allowed-tools.txt read as a typo.
+    Here the family's `enabled` callable hides it instead of skipping the
+    definition."""
+    from redmine_mcp_server._tool_allow_list import CONDITIONALLY_REGISTERED
+
+    assert "list_easy_sprints" not in CONDITIONALLY_REGISTERED
+    assert "easy" in PLUGIN_FLAGS
 
 
 def test_the_module_exposes_no_raw_sql_entry_point():

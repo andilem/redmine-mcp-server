@@ -18,8 +18,8 @@ from unittest.mock import patch
 import pytest
 from redminelib.exceptions import ResourceNotFoundError, ValidationError
 
-from redmine_mcp_server.tools import easy_attendances as att_mod
-from redmine_mcp_server.tools.easy_attendances import (
+from redmine_mcp_easy import attendances as att_mod
+from redmine_mcp_easy.attendances import (
     _attendance_to_dict,
     approve_easy_attendances,
     delete_easy_attendance,
@@ -27,7 +27,7 @@ from redmine_mcp_server.tools.easy_attendances import (
     manage_easy_attendance,
 )
 
-_CLIENT_FACTORY = "redmine_mcp_server._easy_api._get_redmine_client"
+_CLIENT_FACTORY = "redmine_mcp_easy._api.get_redmine_client"
 
 
 def _record(
@@ -325,7 +325,7 @@ class TestDelete:
 
     @pytest.mark.asyncio
     async def test_read_only_mode_blocks_it(self):
-        with patch.object(att_mod, "_is_read_only_mode", return_value=True):
+        with patch.object(att_mod, "is_read_only_mode", return_value=True):
             with patch.object(att_mod, "easy_request") as request:
                 result = await delete_easy_attendance(
                     attendance_id=1, confirm_delete=True
@@ -433,7 +433,7 @@ class TestApproval:
 
     @pytest.mark.asyncio
     async def test_read_only_mode_blocks_it(self):
-        with patch.object(att_mod, "_is_read_only_mode", return_value=True):
+        with patch.object(att_mod, "is_read_only_mode", return_value=True):
             with patch.object(att_mod, "easy_request") as request:
                 result = await approve_easy_attendances(
                     attendance_ids=[1], confirm=True
@@ -447,7 +447,7 @@ class TestRawEasyRequests:
         """python-redmine reads response.json()['errors'] on a 422; Easy's
         own endpoints do not all answer in that shape.
         """
-        from redmine_mcp_server._easy_api import easy_request
+        from redmine_mcp_easy._api import easy_request
 
         engine = SimpleNamespace(
             request=lambda *a, **kw: (_ for _ in ()).throw(KeyError("errors"))
@@ -459,7 +459,7 @@ class TestRawEasyRequests:
         assert "422" in str(excinfo.value)
 
     def test_an_empty_body_becomes_none(self):
-        from redmine_mcp_server._easy_api import easy_request
+        from redmine_mcp_easy._api import easy_request
 
         engine = SimpleNamespace(request=lambda *a, **kw: True)
         client = SimpleNamespace(url="https://redmine.example", engine=engine)
@@ -467,7 +467,7 @@ class TestRawEasyRequests:
             assert easy_request("delete", "easy_attendances/1.json") is None
 
     def test_the_path_is_joined_without_a_double_slash(self):
-        from redmine_mcp_server._easy_api import easy_request
+        from redmine_mcp_easy._api import easy_request
 
         seen = {}
 
@@ -484,7 +484,7 @@ class TestRawEasyRequests:
     def test_first_list_finds_the_array_whatever_the_key_is_called(self):
         """Attendance activities come back from /easy_entity_activities.json,
         so the wrapper key cannot be derived from the path."""
-        from redmine_mcp_server._easy_api import first_list
+        from redmine_mcp_easy._api import first_list
 
         assert first_list({"total_count": 2, "whatever": [1, 2]}) == [1, 2]
         assert first_list({"total_count": 2}) == []
@@ -492,11 +492,18 @@ class TestRawEasyRequests:
 
 
 class TestRegistration:
-    def test_the_tools_are_mapped_even_though_they_register_conditionally(self):
-        """An unmapped tool is denied outright by the scope middleware, so a
-        conditional registration must still carry both central entries."""
+    def test_the_tools_are_mapped_and_the_family_owns_a_flag(self):
+        """An unmapped tool is denied outright by the scope middleware, so the
+        spec has to carry both central entries -- and it does, because
+        `register_extension` refuses a spec whose `tool_kinds` and
+        `tool_scopes` cover different tools.
+
+        The allow list needs no entry any more: the tools are defined
+        unconditionally and tagged `plugin:easy`, so they are registered
+        whatever the flag says and only their *visibility* depends on it.
+        """
         from redmine_mcp_server._annotations import TOOL_KINDS
-        from redmine_mcp_server._tool_allow_list import CONDITIONALLY_REGISTERED
+        from redmine_mcp_server._plugin_visibility import PLUGIN_FLAGS
         from redmine_mcp_server.oauth_scopes import TOOL_SCOPES
 
         for name in (
@@ -507,4 +514,4 @@ class TestRegistration:
         ):
             assert name in TOOL_SCOPES
             assert name in TOOL_KINDS
-            assert name in CONDITIONALLY_REGISTERED
+            assert "easy" in PLUGIN_FLAGS

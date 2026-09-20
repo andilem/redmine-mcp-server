@@ -121,21 +121,6 @@ TOOL_KINDS: Dict[str, ToolKind] = {
     # Empty scope set like list_redmine_roles, but it deletes files. This is
     # why annotations cannot be inferred from scope membership.
     "cleanup_attachment_files": ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT,
-    # --- Easy Redmine (registered only when REDMINE_EASY_ENABLED is truthy)
-    "list_easy_sprints": ToolKind.READ,
-    "list_easy_attendances": ToolKind.READ,
-    # create/update: update overwrites what is there, like
-    # manage_redmine_news and manage_time_entry.
-    "manage_easy_attendance": ToolKind.WRITE_DESTRUCTIVE,
-    "delete_easy_attendance": ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT,
-    # Not additive: approving signs off someone's working time, and the
-    # decision overwrites whatever approval_status was there before.
-    "approve_easy_attendances": ToolKind.WRITE_DESTRUCTIVE,
-    "list_easy_checklists": ToolKind.READ,
-    # Both manage tools update as well as create, like manage_redmine_news.
-    "manage_easy_checklist": ToolKind.WRITE_DESTRUCTIVE,
-    "manage_easy_checklist_item": ToolKind.WRITE_DESTRUCTIVE,
-    "delete_easy_checklist": ToolKind.WRITE_DESTRUCTIVE_IDEMPOTENT,
     # --- search ---
     "search_entire_redmine": ToolKind.READ,
     # --- enumeration ---

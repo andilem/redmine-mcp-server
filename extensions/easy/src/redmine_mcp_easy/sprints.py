@@ -8,13 +8,14 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from redminelib.exceptions import ForbiddenError, ResourceNotFoundError
-
-from .._client import _get_redmine_client
-from .._easy_db import fetch_sprints, is_configured
-from .._env import _is_easy_enabled
-from .._errors import _handle_redmine_error
-from .._offload import in_thread
-from ..server import mcp
+from redmine_mcp_server.extensions import (
+    get_redmine_client,
+    handle_redmine_error,
+    in_thread,
+    mcp,
+    plugin_tag,
+)
+from ._db import fetch_sprints, is_configured
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ def _resolve_project(project_id: int, names: Dict[int, Optional[str]]) -> None:
     """
     if project_id in names:
         return
-    client = _get_redmine_client()
+    client = get_redmine_client()
     try:
         project = client.project.get(project_id)
     except (ForbiddenError, ResourceNotFoundError):
@@ -197,7 +198,7 @@ async def list_easy_sprints(
                     try:
                         _resolve_project(candidate, names)
                     except Exception as exc:
-                        return _handle_redmine_error(
+                        return handle_redmine_error(
                             exc, "checking project visibility for sprints", {}
                         )
                 keep, project_ref = _place(sprint, names)
@@ -221,8 +222,9 @@ async def list_easy_sprints(
     return await in_thread(_run)
 
 
-# Registered on the MCP surface only when Easy Redmine support is on, the
-# same shape as the admin-gated cleanup tool. A stock Redmine has no
-# easy_sprints table, so an always-present tool could only ever fail.
-if _is_easy_enabled():
-    list_easy_sprints = mcp.tool()(list_easy_sprints)
+# Registered unconditionally and tagged: the family's `enabled`
+# callable in the ExtensionSpec is what hides these when
+# REDMINE_EASY_ENABLED is off. Decorating at the bottom rather than
+# at each `def` keeps the tool's own signature readable, and the
+# annotations are read out of TOOL_KINDS here either way.
+list_easy_sprints = mcp.tool(tags={plugin_tag("easy")})(list_easy_sprints)
