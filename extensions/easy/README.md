@@ -49,6 +49,13 @@ list, so there is no name to gate on, and Redmine's own server-side
 permissions are what stands. Leaving them unmapped instead would be worse —
 the scope middleware denies an unmapped tool outright.
 
+Every checklist write ends by reading the checklist back, because the write
+endpoints answer either with nothing or about a single entry. That read can
+fail where the write succeeded, so it is never reported as a failed write:
+the result says `created`/`updated` and carries a note instead of the
+contents. Do not retry on that note — a repeated create is a second
+checklist, not a no-op.
+
 ## Issues
 
 `easy_sprint_id`, `easy_story_points` and `target_backlog` are registered as

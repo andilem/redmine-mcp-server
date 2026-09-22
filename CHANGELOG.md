@@ -262,6 +262,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#313](https://github.com/jztan/redmine-mcp-server/issues/313), [#315](https://github.com/jztan/redmine-mcp-server/pull/315)).
 
 ### Fixed
+- `manage_easy_checklist(update)` reported a successful write as "Access
+  denied" whenever the checklist could not be read back afterwards. The
+  read-back is a courtesy -- the PUT answers with nothing, so the state has
+  to be fetched -- but its failure was returned as the result. Reported from
+  a run over 36 tickets where every write had gone through and the retry
+  that followed left a duplicate checklist behind, which is the damage this
+  shape causes: on this API a repeated create is a second checklist, not a
+  no-op. All four checklist tools now end a write the same way, reporting
+  `updated`/`created` with a note naming the unread checklist and telling
+  the caller not to repeat the call. Reading a checklist back can fail where
+  writing it succeeded; that is Easy's business, and no reason to mislabel
+  the write.
+- `delete_easy_checklist` refused a confirmed deletion when the checklist
+  could not be read first. That read serves the confirmation preview only,
+  so it no longer blocks a deletion the caller has already confirmed -- a
+  read that says the checklist is gone still does, because then there is
+  nothing to delete.
 - Journals are sorted by id before `journal_limit` slices them. Redmine
   reverses them for an API user who has "display comments in reverse
   chronological order" set, so the same `journal_limit` returned different

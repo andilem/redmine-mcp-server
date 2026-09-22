@@ -211,6 +211,29 @@ class TestChecklistWrites:
         assert "Neuer Name" in result["checklist"]["name"]
 
     @pytest.mark.asyncio
+    async def test_a_failed_read_back_does_not_report_the_write_as_failed(self):
+        """Reported from the field: 36 updates answered "Access denied"
+        while every write had gone through, and the retry that followed
+        left a duplicate checklist behind."""
+        calls = []
+
+        def _request(method, path, params=None, data=None):
+            calls.append(method)
+            if method == "put":
+                return None
+            raise ForbiddenError
+
+        with patch.object(cl_mod, "easy_request", side_effect=_request):
+            result = await manage_easy_checklist(
+                action="update", checklist_id=7, name="Neuer Name"
+            )
+        assert calls == ["put", "get"]
+        assert result["updated"] is True
+        assert "error" not in result
+        assert "checklist" not in result
+        assert "Do not repeat the call" in result["note"]
+
+    @pytest.mark.asyncio
     async def test_update_needs_something_to_change(self):
         result = await manage_easy_checklist(action="update", checklist_id=7)
         assert "name or items" in result["error"]
@@ -438,6 +461,37 @@ class TestDelete:
             result = await delete_easy_checklist(item_id=3, confirm_delete=True)
         assert calls == [("delete", "easy_checklist_items/3.json")]
         assert result["deleted"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_confirmed_delete_survives_an_unreadable_preview(self):
+        """The read serves the preview. Once the caller has confirmed, an
+        unreadable checklist is no reason to refuse what they asked for."""
+        calls = []
+
+        def _request(method, path, params=None, data=None):
+            calls.append(method)
+            if method == "get":
+                raise ForbiddenError
+            return None
+
+        with patch.object(cl_mod, "easy_request", side_effect=_request):
+            result = await delete_easy_checklist(checklist_id=7, confirm_delete=True)
+        assert calls == ["get", "delete"]
+        assert result["deleted"] is True
+        assert "checklist" not in result
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_checklist_still_blocks_the_preview(self):
+        """Without confirmation there is nothing to show, so the read
+        failure is the answer."""
+
+        def _request(method, path, params=None, data=None):
+            raise ForbiddenError
+
+        with patch.object(cl_mod, "easy_request", side_effect=_request):
+            result = await delete_easy_checklist(checklist_id=7)
+        assert "error" in result
+        assert result.get("deleted") is not True
 
     @pytest.mark.asyncio
     async def test_a_missing_checklist_is_named(self):

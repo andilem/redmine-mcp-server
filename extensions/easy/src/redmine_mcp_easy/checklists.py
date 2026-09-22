@@ -347,7 +347,14 @@ async def _update_checklist_action(
     items: Optional[List[Any]] = None,
     **_ignored: Any,
 ) -> Dict[str, Any]:
-    """PUT /easy_checklists/{id}.json, then read the checklist back."""
+    """PUT /easy_checklists/{id}.json, then read the checklist back.
+
+    The read-back is a courtesy, not the result. Reading a checklist back
+    can fail where writing it succeeded, and reporting that as a failed
+    update is worse than reporting an unread success: a caller that
+    believes its write failed writes again, and on this API that means a
+    second checklist rather than a no-op.
+    """
     if not is_positive_int(checklist_id):
         return {"error": "update needs checklist_id, a positive integer."}
 
@@ -379,13 +386,7 @@ async def _update_checklist_action(
             )
         except Exception as exc:
             return handle_redmine_error(exc, "updating an Easy Redmine checklist")
-        try:
-            checklist = _read_checklist(checklist_id)
-        except Exception as exc:
-            return handle_redmine_error(
-                exc, "reading back the updated Easy Redmine checklist"
-            )
-        return {"checklist": checklist, "updated": True}
+        return _with_checklist(checklist_id, "updated")
 
     return await in_thread(_run)
 
@@ -520,12 +521,15 @@ async def _update_item_action(
 
 
 def _with_checklist(checklist_id: Optional[int], verb: str) -> Dict[str, Any]:
-    """Report the owning checklist after an item write, if it can be read.
+    """Report a checklist after a write to it, if it can be read.
 
-    The item endpoints answer about the item, which leaves the caller
-    without the thing it asked about -- how the list looks now. A failed
-    read-back is reported as done-but-unread rather than as an error: the
-    write already happened.
+    Every write here ends this way. The item endpoints answer about the
+    item and the checklist PUT answers with nothing, so neither leaves the
+    caller with the thing it asked about -- how the list looks now.
+
+    A failed read-back is reported as done-but-unread, never as an error.
+    The write already happened, and a caller told otherwise writes again:
+    on this API a repeated create is a second checklist, not a no-op.
     """
     result: Dict[str, Any] = {verb: True}
     if not is_positive_int(checklist_id):
@@ -535,8 +539,9 @@ def _with_checklist(checklist_id: Optional[int], verb: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 -- the write already happened
         logger.debug("Checklist %s not readable after a write: %s", checklist_id, exc)
         result["note"] = (
-            f"The item was {verb}, but checklist {checklist_id} could not be "
-            "read back."
+            f"The write succeeded ({verb}), but checklist {checklist_id} "
+            "could not be read back, so this reports no contents. Do not "
+            "repeat the call: read it with list_easy_checklists instead."
         )
         return result
     if checklist:
@@ -630,11 +635,24 @@ def delete_easy_checklist(
     if checklist_id is not None:
         if not is_positive_int(checklist_id):
             return {"error": "checklist_id must be a positive integer."}
+        # The read is for the confirmation preview. When the caller has
+        # already confirmed, a checklist that cannot be read is no reason to
+        # refuse the deletion they asked for.
+        checklist = None
+        read_failed = False
         try:
             checklist = _read_checklist(checklist_id)
         except Exception as exc:
-            return handle_redmine_error(exc, "reading the Easy Redmine checklist")
-        if checklist is None:
+            if not confirm_delete:
+                return handle_redmine_error(exc, "reading the Easy Redmine checklist")
+            read_failed = True
+            logger.debug(
+                "Checklist %s not readable before delete: %s", checklist_id, exc
+            )
+        # "The read failed" and "the read says it is gone" are different
+        # answers: the first is no reason to refuse a confirmed deletion,
+        # the second is, because there would be nothing to delete.
+        if checklist is None and not read_failed:
             return {
                 "error": f"Checklist {checklist_id} does not exist.",
                 "code": "NOT_FOUND",
@@ -655,7 +673,10 @@ def delete_easy_checklist(
             easy_request("delete", f"easy_checklists/{checklist_id}.json")
         except Exception as exc:
             return handle_redmine_error(exc, "deleting the Easy Redmine checklist")
-        return {"deleted": True, "checklist_id": checklist_id, "checklist": checklist}
+        result: Dict[str, Any] = {"deleted": True, "checklist_id": checklist_id}
+        if checklist is not None:
+            result["checklist"] = checklist
+        return result
 
     if not is_positive_int(item_id):
         return {"error": "item_id must be a positive integer."}
