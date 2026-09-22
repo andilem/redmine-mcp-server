@@ -49,6 +49,11 @@ list, so there is no name to gate on, and Redmine's own server-side
 permissions are what stands. Leaving them unmapped instead would be worse —
 the scope middleware denies an unmapped tool outright.
 
+A nested entry passed to `manage_easy_checklist` must carry a `subject`,
+even when the change is only a tick: Easy drops an entry without one and
+still answers 200. `manage_easy_checklist_item` takes `done` and `position`
+on their own.
+
 Every checklist write ends by reading the checklist back, because the write
 endpoints answer either with nothing or about a single entry. That read can
 fail where the write succeeded, so it is never reported as a failed write:

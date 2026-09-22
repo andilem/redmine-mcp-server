@@ -274,6 +274,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the caller not to repeat the call. Reading a checklist back can fail where
   writing it succeeded; that is Easy's business, and no reason to mislabel
   the write.
+- `manage_easy_checklist` accepted a nested entry with an `id` but no
+  `subject` -- `{"id": 5, "done": true}` to tick a box -- which this Easy
+  Redmine drops without a word while answering 200. It read as a successful
+  tick that never happened. Such an entry is now refused, with the two ways
+  that do work: repeat the entry's text alongside the change, or use
+  `manage_easy_checklist_item`, which takes `done` and `position` on their
+  own. Found by re-testing the update path against the instance.
 - `delete_easy_checklist` refused a confirmed deletion when the checklist
   could not be read first. That read serves the confirmation preview only,
   so it no longer blocks a deletion the caller has already confirmed -- a

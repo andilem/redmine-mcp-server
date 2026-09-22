@@ -188,6 +188,11 @@ def _normalize_items(items: Any) -> Union[List[Dict[str, Any]], str]:
     and ``position``. An ``id`` updates that item, its absence adds one --
     that is Rails' nested-attributes rule, not a choice made here.
 
+    Every entry must carry a ``subject``. Easy ignores a nested entry
+    without one and answers 200 regardless, so ``{"id": 5, "done": true}``
+    would read as a successful tick that never happened. Refusing it here
+    is the only place that failure can still be seen.
+
     Returns the list, or a string describing what was wrong with it.
     """
     if not isinstance(items, list):
@@ -219,8 +224,19 @@ def _normalize_items(items: Any) -> Union[List[Dict[str, Any]], str]:
             entry["id"] = item["id"]
         if item.get("position") is not None:
             entry["new_position"] = item["position"]
-        if "subject" not in entry and "id" not in entry:
-            return f"items[{index}] needs a subject, or an id to change."
+        if "subject" not in entry:
+            # Verified against the instance: a nested entry without a
+            # subject is dropped without a word -- id plus done alone left
+            # the entry untouched and the response reported success. Refuse
+            # it rather than let the caller believe it landed.
+            return (
+                f"items[{index}] needs a subject. This Easy Redmine ignores "
+                "a nested entry that has none, silently, so passing an id "
+                "with only done or position changes nothing. Repeat the "
+                "entry's current text alongside the change, or use "
+                "manage_easy_checklist_item, which takes done and position "
+                "on their own."
+            )
         out.append(entry)
     return out
 
@@ -419,8 +435,11 @@ async def manage_easy_checklist(
             ``update`` (cannot be blank).
         items: Entries, as strings (``"Ticket schließen"``, added unticked)
             or objects with ``subject``, ``done``, ``position`` and, to
-            change an existing entry rather than add one, ``id``. At most
-            100 per call.
+            change an existing entry rather than add one, ``id``. Every
+            entry needs a ``subject``, including one that only ticks a box:
+            Easy drops a nested entry without one and still reports
+            success. To change ``done`` or ``position`` alone, use
+            ``manage_easy_checklist_item``. At most 100 per call.
 
     Returns:
         ``{"checklist": {...}, "created"|"updated": True}``, the checklist

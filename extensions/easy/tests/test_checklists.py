@@ -83,8 +83,17 @@ class TestItemNormalization:
         assert _normalize_items(["Review"]) == [{"subject": "Review", "done": False}]
 
     def test_an_id_marks_an_entry_as_a_change_rather_than_an_addition(self):
-        out = _normalize_items([{"id": 3, "done": True}])
-        assert out == [{"done": True, "id": 3}]
+        out = _normalize_items([{"id": 3, "subject": "Review", "done": True}])
+        assert out == [{"subject": "Review", "done": True, "id": 3}]
+
+    def test_a_nested_entry_without_a_subject_is_refused(self):
+        """Verified against the instance: Easy drops such an entry and
+        answers 200, so {"id": 5, "done": true} reads as a tick that never
+        happened."""
+        for items in ([{"id": 5, "done": True}], [{"id": 5, "position": 2}]):
+            message = _normalize_items(items)
+            assert "needs a subject" in message
+            assert "manage_easy_checklist_item" in message
 
     def test_position_travels_under_easys_own_name(self):
         out = _normalize_items([{"subject": "Erst dies", "position": 2}])
@@ -97,6 +106,7 @@ class TestItemNormalization:
             ([""], "is empty"),
             ([{"subject": "  "}], "is empty"),
             ([{"done": True}], "needs a subject"),
+            ([{"id": 5, "done": True}], "ignores"),
             ([{"id": 0, "subject": "x"}], "positive integer"),
             ([42], "string or an object"),
             ([{"subject": "x"}] * 101, "At most 100"),
