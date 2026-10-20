@@ -22,6 +22,11 @@ on purpose, since both name the same Redmine user:
   ``X-Redmine-API-Key``, ``api-key:<hex>``. The key itself is never stored.
   It is checked the way every tool call checks it first, so a slot is never
   bound to the digest of a header the call would then refuse.
+- ``redmine-login`` (SPIKE stage 2): the Redmine login the sign-in bound to
+  the token, ``redmine-login:<login>``. The binding carries the login and
+  the api_key, not the user id, and a login names one user as surely; the
+  prefix keeps it apart from an id, which a numeric login would otherwise
+  pass for.
 - ``legacy``: everyone is the one configured account, so there is no one to
   tell apart and the answer is ``None``.
 
@@ -73,6 +78,13 @@ def staged_upload_owner() -> Optional[str]:
             return None
         return f"redmine-user:{user_id}"
 
+    if mode == "redmine-login":  # SPIKE stage 2
+        claims = getattr(get_access_token(), "claims", None)
+        login = claims.get("redmine_login") if isinstance(claims, dict) else None
+        if not isinstance(login, str) or not login:
+            return None
+        return f"redmine-login:{login}"
+
     if mode in _OAUTH_MODES:
         subject = getattr(get_access_token(), "subject", None)
         return f"redmine-user:{subject}" if subject else None
@@ -98,8 +110,9 @@ def staged_upload_owner() -> Optional[str]:
 def identity_expected() -> bool:
     """Whether this request ought to have an identity to bind a slot to.
 
-    True in ``api-key-login`` and ``legacy-per-user``, where every request
-    carries its caller, and in the OAuth modes whenever there is a verified
+    True in ``api-key-login``, ``redmine-login`` and ``legacy-per-user``,
+    where every request carries its caller, and in the OAuth modes whenever
+    there is a verified
     token. False in ``legacy``, and in the OAuth modes without a token, which
     is no authenticated request at all. Where this is true and no owner
     could be worked out, the ticket is refused: an unbound slot there would
@@ -107,7 +120,7 @@ def identity_expected() -> bool:
     binding exists to close.
     """
     mode = _auth_mode()
-    if mode in ("api-key-login", "legacy-per-user"):
+    if mode in ("api-key-login", "redmine-login", "legacy-per-user"):
         return True
     if mode in _OAUTH_MODES:
         return get_access_token() is not None
@@ -117,11 +130,14 @@ def identity_expected() -> bool:
 _UNIDENTIFIED = "Could not identify the caller to bind this upload to."
 
 # What to do about it, by mode. In the OAuth modes the usual cause is the
-# /users/current.json lookup failing, which a retry often clears; in the other
-# two the request itself is missing what names the caller, and a retry would
-# carry the same gap.
+# /users/current.json lookup failing, which a retry often clears; in the
+# others the request itself is missing what names the caller, and a retry
+# would carry the same gap.
 _UNIDENTIFIED_REMEDY = {
     "api-key-login": (
+        "The session is not bound to a Redmine user. Reconnect to sign in again."
+    ),
+    "redmine-login": (  # SPIKE stage 2
         "The session is not bound to a Redmine user. Reconnect to sign in again."
     ),
     "legacy-per-user": (

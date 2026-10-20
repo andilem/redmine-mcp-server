@@ -109,6 +109,28 @@ async def test_the_token_carries_the_callers_key(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_staged_upload_is_bound_to_the_signed_in_user(tmp_path):
+    """The claims the provider sets are the ones ``_caller`` reads, so an
+    upload ticket in this mode belongs to the caller instead of to anyone
+    who learns its id."""
+    from unittest.mock import patch
+
+    from redmine_mcp_server import _caller
+    from redmine_mcp_server import _client as client_module
+
+    provider = _provider(tmp_path)
+    access = await provider.load_access_token(
+        (await _issue(provider, _client())).access_token
+    )
+    with (
+        patch.object(client_module, "REDMINE_AUTH_MODE", "redmine-login"),
+        patch.object(_caller, "get_access_token", return_value=access),
+    ):
+        assert _caller.identity_expected() is True
+        assert await _caller.resolve_staged_upload_owner() == f"redmine-login:{LOGIN}"
+
+
+@pytest.mark.asyncio
 async def test_a_restart_keeps_the_session(tmp_path):
     """A fresh provider on the same store still honours the token."""
     issued = await _issue(_provider(tmp_path), _client())

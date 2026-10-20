@@ -955,6 +955,19 @@ class TestCallerIdentity:
         "mode, token, expected",
         [
             ("api-key-login", {"claims": {"redmine_user_id": 7}}, "redmine-user:7"),
+            (
+                "redmine-login",
+                {"subject": "jdoe", "claims": {"redmine_login": "jdoe"}},
+                "redmine-login:jdoe",
+            ),
+            # A numeric login is still a login, not a user id.
+            (
+                "redmine-login",
+                {"claims": {"redmine_login": "7"}},
+                "redmine-login:7",
+            ),
+            ("redmine-login", {"claims": {}}, None),
+            ("redmine-login", {"claims": {"redmine_login": 7}}, None),
             ("oauth", {"subject": "5"}, "redmine-user:5"),
             ("oauth-proxy", {"subject": "5"}, "redmine-user:5"),
             # Without a token the client would fall back to the configured
@@ -1067,6 +1080,7 @@ class TestCallerIdentity:
         "mode, has_token, expected",
         [
             ("api-key-login", True, True),
+            ("redmine-login", True, True),
             ("legacy-per-user", False, True),
             ("oauth", True, True),
             ("oauth-proxy", True, True),
