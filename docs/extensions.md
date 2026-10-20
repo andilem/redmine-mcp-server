@@ -332,6 +332,7 @@ These are the names an extension may import from `redmine_mcp_server.extensions`
 | Defining tools | `mcp`, `plugin_tag`, `offloaded`, `in_thread`, `action_dispatch`, `ActionMode`, `ToolKind` |
 | Reaching Redmine | `get_redmine_client`, `redmine_url`, `handle_redmine_error`, `READ_ONLY_ERROR` |
 | Returning content | `wrap_insecure_content` |
+| Reading a staged upload | `text_from_staged_upload`, `read_staged`, `resolve_staged_upload_owner`, `staged_upload_owner` |
 | Validation and environment | `is_positive_int`, `is_true_env`, `is_read_only_mode`, `is_crm_enabled` |
 
 The module docstring of `src/redmine_mcp_server/extensions.py` is the reference for
@@ -339,3 +340,29 @@ what each of them does. Nothing else in the package is a stable import: the priv
 helpers behind these names are renamed and moved as the server changes, and an
 extension ships separately from this distribution, so it cannot follow such a
 rename. Import from `redmine_mcp_server.extensions` only, and pin the version.
+
+A tool that takes an `upload_id` from
+[`create_upload_ticket`](tool-reference.md#create_upload_ticket) reads it through one
+of the two staged-upload readers. `text_from_staged_upload` is for a long text that
+becomes a field, the way `description_upload_id` and `notes_upload_id` do: it decodes
+the file as UTF-8 and names the field in its error when that fails. `read_staged`
+hands back the bytes and the uploaded filename unchanged, for a file that is attached
+rather than read.
+
+A staged file belongs to the caller who created its ticket, so both readers take that
+caller as `owner=`, and a slot read without its owner answers like an id that was never
+issued. Get it with `await resolve_staged_upload_owner()` in the tool's async body,
+before any work moves to a worker thread: in the OAuth modes it may ask Redmine who the
+caller is, with one `GET /users/current.json`, when the token carries no `sub`.
+`staged_upload_owner()` is the synchronous part of the same answer, what is known
+without that request.
+
+```python
+@mcp.tool(tags={plugin_tag("acme_widgets")})
+async def manage_widget(action: str, body_upload_id: str) -> dict:
+    owner = await resolve_staged_upload_owner()
+    body, error = text_from_staged_upload(body_upload_id, "body", owner=owner)
+    if error is not None:
+        return error
+    ...
+```

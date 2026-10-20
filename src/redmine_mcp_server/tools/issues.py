@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from typing import Annotated, Any, Dict, List, Literal, Optional, Set, Union
 
 from pydantic import Field
@@ -18,6 +19,10 @@ from redminelib.exceptions import (
 from redminelib.resources import Issue
 
 from .._cleanup import _ensure_cleanup_started
+from .._caller import (
+    resolve_staged_upload_owner,
+    resolve_staged_upload_owner_blocking,
+)
 from .._client import _get_redmine_client, logger
 from .._custom_fields import (
     _augment_fields_with_required_custom_fields,
@@ -28,6 +33,7 @@ from .._custom_fields import (
     _map_named_custom_fields_for_update,
     _parse_create_issue_fields,
     _parse_optional_object_payload,
+    _unverified_issue_fields,
 )
 from .._decorators import ActionMode, action_dispatch
 from .._env import _is_agile_enabled, _is_read_only_mode, _is_tags_enabled
@@ -42,6 +48,7 @@ from .._serialization import (
     _attachment_to_dict,
     _custom_fields_to_list,
     _included_list,
+    _included_resources,
     _issue_relation_to_dict,
     _issue_relations_to_list,
     _iter_capped,
@@ -388,6 +395,72 @@ def _search_needs_hydration(fields: Optional[List[str]]) -> bool:
     return any(f not in _SEARCH_API_NATIVE_FIELDS for f in fields)
 
 
+# The issue id in a search result's `url`. Not anchored, so a Redmine under a
+# sub-URI (`https://host/redmine/issues/42`) still matches.
+_SEARCH_URL_ISSUE_ID = re.compile(r"/issues/(\d+)")
+
+
+def _search_row_value(row: Any, key: str) -> Any:
+    """Read a key off a search row as Redmine sent it.
+
+    Goes through ``raw()`` when there is one: on a python-redmine resource
+    ``url`` is a property built from ``id``, not the ``url`` in the payload.
+    """
+    raw = getattr(row, "raw", None)
+    if callable(raw):
+        try:
+            payload = raw()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            return payload.get(key)
+    return getattr(row, key, None)
+
+
+def _search_result_issue_id(row: Any) -> Any:
+    """Return the real issue id of a search row.
+
+    Easy Redmine offsets the ``id`` in /search.json per entity type (issues
+    by 300000000), while ``url`` keeps the real one. Read it from ``url``
+    once any query or fragment is gone, and fall back to ``id``.
+    """
+    url = _search_row_value(row, "url")
+    if isinstance(url, str):
+        path = url.split("#", 1)[0].split("?", 1)[0]
+        match = _SEARCH_URL_ISSUE_ID.search(path)
+        if match:
+            return int(match.group(1))
+    return getattr(row, "id", None)
+
+
+def _search_title_subject(title: str, issue_id: Any) -> str:
+    """Strip the stock ``Tracker #id (Status): `` prefix off a search title.
+
+    Only a prefix carrying the row's own id is stripped: tracker and status
+    names can hold spaces and parentheses, so a looser pattern could eat
+    part of the subject. Easy Redmine sends the plain subject, left as is.
+    """
+    prefix = re.match(rf".*?#{issue_id} \(.*?\): ", title, re.DOTALL)
+    return title[prefix.end() :] if prefix else title
+
+
+class _SparseSearchRow:
+    """A search row that was not hydrated, with its real id and a subject.
+
+    Everything else is read from the row as /search.json returned it.
+    """
+
+    def __init__(self, row: Any) -> None:
+        self._row = row
+        self.id = _search_result_issue_id(row)
+        title = _search_row_value(row, "title")
+        if isinstance(title, str):
+            self.subject = _search_title_subject(title, self.id)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._row, name)
+
+
 def _hydrate_search_results(search_results: List[Any]) -> List[Any]:
     """Re-fetch search hits via /issues.json so structured fields populate.
 
@@ -397,21 +470,21 @@ def _hydrate_search_results(search_results: List[Any]) -> List[Any]:
     matching ids and substitutes the full record where available.
 
     Preserves the original search ordering. Falls back per-issue to the
-    sparse search result for any id missing from the hydration response.
-    On any unexpected error, returns the original list unchanged so the
-    caller never loses data.
+    sparse search result for any id missing from the hydration response,
+    with the real id and a subject taken from its title. On any unexpected
+    error, returns the sparse rows so the caller never loses data.
     """
     if not search_results:
         return search_results
 
     ids: List[Any] = []
     for issue in search_results:
-        issue_id = getattr(issue, "id", None)
+        issue_id = _search_result_issue_id(issue)
         if issue_id is not None:
             ids.append(issue_id)
 
     if not ids:
-        return search_results
+        return [_SparseSearchRow(issue) for issue in search_results]
 
     hydrated_by_id: Dict[Any, Any] = {}
     try:
@@ -430,12 +503,20 @@ def _hydrate_search_results(search_results: List[Any]) -> List[Any]:
                     hydrated_by_id[full_id] = full_issue
     except Exception as e:
         logging.warning(f"Failed to hydrate search results, returning sparse data: {e}")
-        return search_results
+        return [_SparseSearchRow(issue) for issue in search_results]
 
-    return [
-        hydrated_by_id.get(getattr(issue, "id", None), issue)
-        for issue in search_results
-    ]
+    missing = len(set(ids) - set(hydrated_by_id))
+    if missing:
+        logging.warning(
+            f"Hydration returned {len(ids) - missing} of {len(ids)} search "
+            f"results, returning sparse data for the other {missing}"
+        )
+
+    rows: List[Any] = []
+    for issue in search_results:
+        full_issue = hydrated_by_id.get(_search_result_issue_id(issue))
+        rows.append(full_issue if full_issue is not None else _SparseSearchRow(issue))
+    return rows
 
 
 # Top-level keys of an issue payload that `_issue_to_dict` serializes itself.
@@ -477,7 +558,7 @@ _ISSUE_MAPPED_KEYS = frozenset(
 # `unmapped_fields`, where it would sidestep the journal pagination in
 # `get_redmine_issue`.
 # Keys the search endpoint puts on its own result rows. `_hydrate_search_results`
-# returns those sparse rows unchanged when the hydrating fetch fails, and their
+# returns those sparse rows when the hydrating fetch fails or misses, and their
 # `raw()` still carries these three -- stock Redmine fields that would otherwise
 # be reported as plugin additions.
 _SEARCH_RESULT_KEYS = frozenset({"title", "url", "datetime"})
@@ -944,17 +1025,8 @@ def _journals_to_list(
     issue: Any, include_journal_values: bool = False
 ) -> List[Dict[str, Any]]:
     """Convert journals on an issue object to a list of dicts."""
-    raw_journals = getattr(issue, "journals", None)
-    if raw_journals is None:
-        return []
-
     journals: List[Dict[str, Any]] = []
-    try:
-        iterator = iter(raw_journals)
-    except TypeError:
-        return []
-
-    for journal in iterator:
+    for journal in _included_resources(issue, "journals"):
         notes = getattr(journal, "notes", "")
         details = _journal_details_to_list(journal, include_journal_values)
         # Keep journals that have a note OR field-change details. Entries with
@@ -992,24 +1064,15 @@ def _journals_to_list(
 
 def _attachments_to_list(issue: Any) -> List[Dict[str, Any]]:
     """Convert attachments on an issue object to a list of dicts."""
-    raw_attachments = getattr(issue, "attachments", None)
-    if raw_attachments is None:
-        return []
-
-    attachments: List[Dict[str, Any]] = []
-    try:
-        iterator = iter(raw_attachments)
-    except TypeError:
-        return []
-
-    for attachment in iterator:
-        attachments.append(_attachment_to_dict(attachment))
-    return attachments
+    return [
+        _attachment_to_dict(attachment)
+        for attachment in _included_resources(issue, "attachments")
+    ]
 
 
 def _newest_journal_id(issue: Any) -> Optional[int]:
     """Return the id of the newest journal on an issue, or None."""
-    raw = getattr(issue, "journals", None) or []
+    raw = _included_resources(issue, "journals")
     ids = [getattr(j, "id", None) for j in raw if getattr(j, "id", None) is not None]
     return max(ids) if ids else None
 
@@ -1257,26 +1320,23 @@ async def get_redmine_issue(
             if include_attachments:
                 result["attachments"] = _attachments_to_list(issue)
 
+            # Watchers, relations and children from the include= payload,
+            # never the attribute -- see _included_list and
+            # _included_resources.
             if include_watchers:
-                raw = getattr(issue, "watchers", None) or []
-                result["watchers"] = [{"id": w.id, "name": w.name} for w in raw]
+                result["watchers"] = [
+                    _named_ref(w) for w in _included_list(issue, "watchers")
+                ]
             if want_relations:
-                # From the include= payload, not the lazy issue.relations
-                # attribute -- see _included_list.
                 result["relations"] = _issue_relations_to_list(issue)
             if include_children:
-                raw = getattr(issue, "children", None) or []
                 result["children"] = [
                     {
-                        "id": c.id,
-                        "subject": getattr(c, "subject", ""),
-                        "tracker": (
-                            {"id": c.tracker.id, "name": c.tracker.name}
-                            if getattr(c, "tracker", None)
-                            else None
-                        ),
+                        "id": c.get("id"),
+                        "subject": c.get("subject", ""),
+                        "tracker": _named_ref(c.get("tracker")),
                     }
-                    for c in raw
+                    for c in _included_list(issue, "children")
                 ]
 
             if _is_tags_enabled():
@@ -1319,8 +1379,14 @@ async def list_redmine_issues(
     other Redmine issue filter. Use this to list all issues in a project,
     find unassigned issues, or apply any combination of filters.
 
+    A call with no filter returns the open issues of every project the caller
+    can see, 25 per call, each with its full description. Scope a read with
+    ``project_id`` or another filter, and pass ``fields`` when descriptions
+    are not needed.
+
     Args:
-        project_id: Filter by project (ID or string identifier).
+        project_id: Filter by project (ID or string identifier). Omitted,
+            the read spans every project the caller can see.
         status_id: Filter by status. Accepts a numeric status ID, or one
             of the Redmine sentinel strings: ``"open"`` (all open
             statuses, the API default when no filter is given),
@@ -1427,7 +1493,6 @@ async def list_redmine_issues(
 
     Performance:
         - Memory efficient: Uses server-side pagination
-        - Token efficient: Default limit keeps response under 2000 tokens
         - Further reduce tokens: Use fields parameter for minimal data transfer
         - Time efficient: Typically <500ms for limit=25
     """
@@ -1716,7 +1781,6 @@ def search_redmine_issues(
 
     Performance:
         - Memory efficient: Uses server-side pagination
-        - Token efficient: Default limit keeps response under 2000 tokens
         - Further reduce tokens: Use fields parameter for minimal data transfer
     """
 
@@ -1813,6 +1877,8 @@ def search_redmine_issues(
             logging.debug(
                 f"Hydrated {len(issues_list)} search results via /issues.json"
             )
+        else:
+            issues_list = [_SparseSearchRow(issue) for issue in issues_list]
 
         # Convert to dictionaries with optional field selection
         result_issues = [
@@ -1879,6 +1945,16 @@ async def create_redmine_issue(
       additional_tags tags on the new issue. Requires the
       ``create_issue_tags``/``edit_issue_tags`` permission; silently ignored
       when the feature is disabled (default).
+    - A custom field goes in ``fields`` by name (``{"Department": "Sales"}``)
+      or by id as ``cf_<id>`` (``{"cf_2": "Sales"}``), the ids being those
+      ``list_project_issue_custom_fields`` returns. Either form is checked
+      against the project's fields first, and nothing is written when it
+      fails: an id the project does not enable is refused, and so is a name
+      that matches no field and has spaces or capitals or is within a typo
+      of a field name. The refusal names the project's fields.
+    - Any other snake_case ``fields`` key is sent as a top-level attribute,
+      which Redmine ignores without an error if it does not know it. Such
+      keys are listed in ``unverified_fields``, omitted when there are none.
 
     Args:
         project_id: Project the issue belongs to (numeric ID).
@@ -1897,7 +1973,8 @@ async def create_redmine_issue(
             through the conversation. Mutually exclusive with
             ``description``.
         fields: Standard and custom fields, as an object or a JSON object
-            string. Attachments do not go here -- see ``uploads``.
+            string. A custom field is keyed by its name or by ``cf_<id>``.
+            Attachments do not go here -- see ``uploads``.
         extra_fields: Further fields, merged into ``fields``. Object or JSON
             object string.
         uploads: Files to attach to the new issue. Maximum 10 items, 50 MiB
@@ -2003,7 +2080,9 @@ async def create_redmine_issue(
 
     if description_upload_id:
         staged_text, staged_error = _text_from_staged_upload(
-            description_upload_id, "description"
+            description_upload_id,
+            "description",
+            owner=await resolve_staged_upload_owner(),
         )
         if staged_error is not None:
             return staged_error
@@ -2149,7 +2228,14 @@ async def create_redmine_issue(
         except Exception as e:
             return _handle_redmine_error(e, f"creating issue in project {project_id}")
 
-    return await in_thread(_run)
+    result = await in_thread(_run)
+    # ``_run`` rebinds ``issue_fields`` to the resolved payload, so this sees
+    # what was sent.
+    if isinstance(result, dict) and "error" not in result:
+        unverified = _unverified_issue_fields(issue_fields)
+        if unverified:
+            result["unverified_fields"] = unverified
+    return result
 
 
 def _normalized_newlines(text: str) -> str:
@@ -2249,7 +2335,7 @@ def _apply_text_edits(
 
 
 def _text_from_staged_upload(
-    upload_id: str, label: str
+    upload_id: str, label: str, owner: Optional[str] = None
 ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Read a staged upload as the new text for a long field (#314).
 
@@ -2261,9 +2347,14 @@ def _text_from_staged_upload(
     spills it to a file the caller can edit in place, and this is the way
     back.
 
+    ``owner`` is the caller's identity, from ``resolve_staged_upload_owner``
+    in an async tool or ``resolve_staged_upload_owner_blocking`` in an
+    offloaded one. This stays synchronous so it can run in either, which is
+    why it is handed the owner rather than working it out.
+
     Returns ``(text, None)`` or ``(None, {"error": ...})``.
     """
-    content_bytes, _, staged_error = _upload_store.read_staged(upload_id)
+    content_bytes, _, staged_error = _upload_store.read_staged(upload_id, owner=owner)
     if staged_error is not None:
         return None, staged_error
     try:
@@ -2275,6 +2366,226 @@ def _text_from_staged_upload(
                 f"A {label} is text; upload it encoded as UTF-8."
             )
         }
+
+
+# Submitted issue attributes whose effect can be read off the re-fetched issue
+# without guessing at how Redmine normalises them, mapped to the reference
+# Redmine returns them under.
+_UNAPPLIED_REF_FIELDS = {
+    "project_id": "project",
+    "tracker_id": "tracker",
+    "status_id": "status",
+    "priority_id": "priority",
+    "category_id": "category",
+    "fixed_version_id": "fixed_version",
+    "assigned_to_id": "assigned_to",
+    "parent_issue_id": "parent",
+}
+_ISO_DATE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+# A submitted value this check does not know how Redmine will read, so it
+# makes no claim about it either way.
+_UNCHECKED = object()
+
+
+def _submitted_id(value: Any) -> Any:
+    """An id as Redmine would store it, ``None`` for a clear, else unchecked.
+
+    A project identifier, ``"me"`` or ``"#12"`` is resolved by Redmine in ways
+    the re-fetched issue cannot confirm, so they are left alone.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return _UNCHECKED
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return int(text)
+    return _UNCHECKED
+
+
+def _submitted_hours(value: Any) -> Any:
+    """Hours as a float, ``None`` for a clear, else unchecked.
+
+    Redmine also accepts ``"1h30"`` and ``"1:30"`` (``String#to_hours``);
+    those are left alone rather than re-implemented here.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return _UNCHECKED
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return _UNCHECKED
+
+
+_RAILS_FLAGS = {"1": True, "true": True, "0": False, "false": False}
+
+
+def _submitted_flag(value: Any) -> Any:
+    """A boolean in the spellings Rails casts, else unchecked."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        return _RAILS_FLAGS.get(value.strip().lower(), _UNCHECKED)
+    return _UNCHECKED
+
+
+def _custom_value_set(value: Any) -> Any:
+    """A custom field value as the set of non-blank strings Redmine keeps.
+
+    Mirrors ``FieldFormat::Base#set_custom_field_value``: every value is
+    stored as its Ruby ``to_s`` (``true`` as ``"true"``), and a multiple value
+    drops blanks and duplicates. A set also lets a single value compare equal
+    to a one-element list. A hash -- a file custom field takes an upload token
+    and stores the attachment id -- is not stored as sent, so it is left
+    unchecked.
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    normalised = set()
+    for item in items:
+        if item is None:
+            continue
+        if isinstance(item, (dict, list, tuple)):
+            return _UNCHECKED
+        if isinstance(item, bool):
+            item = "true" if item else "false"
+        text = _normalized_newlines(str(item))
+        if text != "":
+            normalised.add(text)
+    return frozenset(normalised)
+
+
+def _same_custom_value(wanted: frozenset, current: Any) -> bool:
+    stored = _custom_value_set(current)
+    if stored is _UNCHECKED or wanted == stored:
+        return True
+    # ``normalize_float`` swaps the caller's locale decimal separator for
+    # ``.``, so ``1,5`` is stored as ``1.5``; and Python and Ruby spell some
+    # floats differently (``1e+16`` against ``1.0e+16``).
+    if len(wanted) == len(stored) == 1:
+        try:
+            submitted = next(iter(wanted)).replace(",", ".")
+            return float(submitted) == float(next(iter(stored)))
+        except ValueError:
+            return False
+    return False
+
+
+def _unapplied_update_fields(
+    submitted: Dict[str, Any], payload: Dict[str, Any]
+) -> List[str]:
+    """Submitted fields the re-fetched issue does not carry.
+
+    Redmine discards several kinds of write without an error, so ``save``
+    succeeds with the field unchanged: a status the workflow does not allow,
+    a tracker or project outside the allowed targets, anything
+    ``delete_unsafe_attributes`` removes (a field the workflow makes
+    read-only, a disabled core field, a date, priority or done ratio derived
+    from subtasks), and a custom field the user may not edit
+    (``Issue#safe_attributes=``). Comparing what was sent with what came back
+    is the only way to see it, and costs nothing: the issue is re-fetched for
+    the response anyway.
+
+    ``payload`` is the re-fetched issue as Redmine sent it (``raw()``), not
+    the serialized dict or the resource attributes: python-redmine turns a
+    date-shaped custom field value into a date even on a text field, and the
+    serializer wraps the description in boundary tags.
+
+    Only fields whose stored form is predictable are checked, so a value
+    Redmine merely normalises is never reported: ids, dates, ``done_ratio``,
+    numeric ``estimated_hours``, ``is_private``, ``subject``, ``description``
+    (line endings aside) and custom field values by id, reported as
+    ``cf_<id>``. Anything else -- ``notes``, ``uploads``, watchers, a project
+    identifier, keys this server routes elsewhere -- is not checked.
+    """
+    unapplied: List[str] = []
+    for key, value in submitted.items():
+        if key in _UNAPPLIED_REF_FIELDS:
+            # python-redmine sends an ``assigned_to_id`` of 0 as a clear.
+            if key == "assigned_to_id" and value == 0 and value is not False:
+                value = None
+            wanted = _submitted_id(value)
+            if wanted is _UNCHECKED:
+                continue
+            ref = payload.get(_UNAPPLIED_REF_FIELDS[key])
+            if wanted != (ref.get("id") if isinstance(ref, dict) else None):
+                unapplied.append(key)
+        elif key in ("start_date", "due_date"):
+            if value is None or value == "":
+                wanted = None
+            elif isinstance(value, str) and _ISO_DATE.match(value.strip()):
+                wanted = value.strip()
+            else:
+                continue
+            if wanted != payload.get(key):
+                unapplied.append(key)
+        elif key == "done_ratio":
+            wanted = _submitted_id(value)
+            if wanted is _UNCHECKED or wanted is None:
+                continue
+            if wanted != payload.get(key):
+                unapplied.append(key)
+        elif key == "estimated_hours":
+            wanted = _submitted_hours(value)
+            if wanted is _UNCHECKED:
+                continue
+            current = payload.get(key)
+            if wanted is None:
+                applied = current is None
+            else:
+                # Rails maps ``:float`` to a single-precision column on MySQL,
+                # so 2.3 can read back as 2.2999999523; Redmine shows hours to
+                # two decimals, so anything closer than that is the same value.
+                applied = (
+                    isinstance(current, (int, float))
+                    and abs(float(current) - wanted) < 0.005
+                )
+            if not applied:
+                unapplied.append(key)
+        elif key == "is_private":
+            wanted = _submitted_flag(value)
+            if wanted is _UNCHECKED:
+                continue
+            if wanted != bool(payload.get(key)):
+                unapplied.append(key)
+        elif key == "subject":
+            if isinstance(value, str) and value != payload.get(key):
+                unapplied.append(key)
+        elif key == "description":
+            if value is None:
+                value = ""
+            if not isinstance(value, str):
+                continue
+            current = payload.get(key)
+            current = current if isinstance(current, str) else ""
+            if _normalized_newlines(value) != _normalized_newlines(current):
+                unapplied.append(key)
+        elif key == "custom_fields" and isinstance(value, list):
+            current_values = {
+                str(entry.get("id")): entry.get("value")
+                for entry in payload.get("custom_fields") or []
+                if isinstance(entry, dict)
+            }
+            for entry in value:
+                if not isinstance(entry, dict) or entry.get("id") is None:
+                    continue
+                wanted = _custom_value_set(entry.get("value"))
+                if wanted is _UNCHECKED:
+                    continue
+                field_id = str(entry["id"])
+                # Absent from the response means not visible to this user,
+                # and a field that is not visible is not editable either.
+                if field_id not in current_values or not _same_custom_value(
+                    wanted, current_values[field_id]
+                ):
+                    unapplied.append(f"cf_{field_id}")
+    return unapplied
 
 
 @mcp.tool()
@@ -2312,14 +2623,35 @@ async def update_redmine_issue(
     or ``edit_issue_tags`` (existing tags only) permission. When
     ``REDMINE_TAGS_ENABLED=false`` (default), ``tag_list`` is silently ignored.
 
-    Non-standard keys in ``fields`` are treated as candidate custom-field names.
-    When a matching project custom field is found, it is translated into
-    ``custom_fields`` entries for Redmine update payloads.
+    A custom field goes in ``fields`` by name (``{"Department": "Sales"}``)
+    or by id as ``cf_<id>`` (``{"cf_2": "Sales"}``); both are translated into
+    the ``custom_fields`` entries Redmine expects. Either form is checked
+    against the project's fields first, and nothing is written when it
+    fails: an id the project does not enable is refused, and so is a name
+    that matches no field and has spaces or capitals or is within a typo of
+    a field name. The refusal names the project's fields.
+
+    Redmine discards some writes without an error -- a status the workflow
+    does not allow, a field the workflow makes read-only, a custom field the
+    user may not edit. When that happens the returned issue carries
+    ``unapplied_fields``, the submitted fields it does not reflect: the call
+    changed less than it asked for, while anything else in it, such as a
+    note, was still written. Custom fields are named ``cf_<id>``, and a status
+    set by name is reported as ``status_name``. The key is omitted when every
+    checked field landed. Only ids, dates, ``done_ratio``, numeric
+    ``estimated_hours``, ``is_private``, ``subject``, ``description`` and
+    custom field values are checked, never notes, uploads, watchers or plugin
+    fields. An unknown ``status_name`` is refused before anything is written.
+
+    Any other snake_case key is sent as a top-level attribute, which Redmine
+    ignores without an error if it does not know it. Such keys are listed in
+    ``unverified_fields``, omitted when there are none.
 
     Args:
         issue_id: The issue to update.
-        fields: The fields to change, including ``notes`` for a comment.
-            Attachments do not go here -- see ``uploads``.
+        fields: The fields to change, including ``notes`` for a comment. A
+            custom field is keyed by its name or by ``cf_<id>``. Attachments
+            do not go here -- see ``uploads``.
         uploads: Files to attach to the issue. Maximum 10 items, 50 MiB
             each. Every item carries exactly one content source:
 
@@ -2426,7 +2758,9 @@ async def update_redmine_issue(
 
     if description_upload_id:
         staged_text, staged_error = _text_from_staged_upload(
-            description_upload_id, "description"
+            description_upload_id,
+            "description",
+            owner=await resolve_staged_upload_owner(),
         )
         if staged_error is not None:
             return staged_error
@@ -2520,23 +2854,73 @@ async def update_redmine_issue(
 
     def _run():
         nonlocal update_fields
+        # A status set by name is reported under the key the caller used.
+        status_named = False
         # Convert status name to id if requested
         if "status_name" in update_fields and "status_id" not in update_fields:
-            name = str(update_fields.pop("status_name")).lower()
+            raw_name = str(update_fields.pop("status_name"))
+            name = raw_name.lower()
+            status_named = True
             try:
-                statuses = _get_redmine_client().issue_status.all()
+                statuses = list(_get_redmine_client().issue_status.all())
+            except Exception as e:
+                # The write goes ahead without the status, and the result
+                # reports ``status_name`` as not applied.
+                logger.warning(f"Error resolving status name '{name}': {e}")
+            else:
                 for status in statuses:
                     if getattr(status, "name", "").lower() == name:
                         update_fields["status_id"] = status.id
                         break
-            except Exception as e:
-                logger.warning(f"Error resolving status name '{name}': {e}")
+                else:
+                    # Dropping it and writing the rest would report success
+                    # for a status change that was never sent (#193).
+                    known = ", ".join(
+                        str(getattr(status, "name", "")) for status in statuses
+                    )
+                    return {
+                        "error": (
+                            f"Unknown status_name {raw_name!r}. Nothing was "
+                            f"changed. Known statuses: {known or 'none'}."
+                        )
+                    }
+
+        def _with_unapplied(result: Dict[str, Any], issue: Any) -> Dict[str, Any]:
+            # Compared with what the caller asked for, after name resolution
+            # but before any required-field autofill a retry adds.
+            unverified = _unverified_issue_fields(update_fields)
+            if unverified:
+                result["unverified_fields"] = unverified
+            try:
+                payload = issue.raw()
+            except Exception:
+                payload = None
+            if not isinstance(payload, dict):
+                return result
+            unapplied = _unapplied_update_fields(update_fields, payload)
+            if status_named:
+                if "status_id" not in update_fields:
+                    # The lookup failed, so no status was sent at all.
+                    unapplied.append("status_name")
+                unapplied = [
+                    "status_name" if key == "status_id" else key for key in unapplied
+                ]
+            # Omitted when empty, like ``unmapped_fields`` beside it.
+            if unapplied:
+                result["unapplied_fields"] = unapplied
+            return result
 
         try:
             if update_fields or upload_descriptors or tags_update_needed:
-                update_fields = _map_named_custom_fields_for_update(
-                    issue_id, update_fields
-                )
+                # As on create: a name that cannot be resolved, or a lookup
+                # that cannot run, is the caller's to fix, and nothing has
+                # been written yet -- not an error in the update itself.
+                try:
+                    update_fields = _map_named_custom_fields_for_update(
+                        issue_id, update_fields
+                    )
+                except ValueError as e:
+                    return {"error": str(e)}
                 update_kwargs = dict(update_fields)
                 if tags_update_needed:
                     update_kwargs["tag_list"] = tag_list
@@ -2562,12 +2946,12 @@ async def update_redmine_issue(
                 )
                 if agile_update_needed:
                     result = _augment_with_agile_data(issue_id, result)
-                return result
+                return _with_unapplied(result, updated_issue)
             updated_issue = _get_redmine_client().issue.get(issue_id)
             result = _issue_to_dict(updated_issue, include_custom_fields=True)
             if agile_update_needed:
                 result = _augment_with_agile_data(issue_id, result)
-            return result
+            return _with_unapplied(result, updated_issue)
         except ValidationError as e:
             if not _is_required_custom_field_autofill_enabled():
                 return _augment_validation_error_with_field_hint(
@@ -2650,12 +3034,12 @@ async def update_redmine_issue(
                     )
                     if agile_update_needed:
                         result = _augment_with_agile_data(issue_id, result)
-                    return result
+                    return _with_unapplied(result, updated_issue)
                 updated_issue = _get_redmine_client().issue.get(issue_id)
                 result = _issue_to_dict(updated_issue, include_custom_fields=True)
                 if agile_update_needed:
                     result = _augment_with_agile_data(issue_id, result)
-                return result
+                return _with_unapplied(result, updated_issue)
             except Exception as retry_error:
                 return _augment_validation_error_with_field_hint(
                     _handle_redmine_error(
@@ -3212,7 +3596,10 @@ def _edit_issue_note_action(
 
     from_upload = bool(notes_upload_id)
     if from_upload:
-        staged, staged_error = _text_from_staged_upload(notes_upload_id, "notes")
+        # Already in a worker thread, so the blocking form of the lookup.
+        staged, staged_error = _text_from_staged_upload(
+            notes_upload_id, "notes", owner=resolve_staged_upload_owner_blocking()
+        )
         if staged_error is not None:
             return staged_error
         notes = staged
@@ -3240,7 +3627,7 @@ def _edit_issue_note_action(
             )
 
         current = None
-        for journal in getattr(issue, "journals", None) or []:
+        for journal in _included_resources(issue, "journals"):
             if getattr(journal, "id", None) == journal_id:
                 current = getattr(journal, "notes", "") or ""
                 break
@@ -3423,15 +3810,8 @@ def get_private_notes(
     """
     try:
         issue = _get_redmine_client().issue.get(issue_id, include="journals")
-        raw_journals = getattr(issue, "journals", None) or []
-
         private: List[Dict[str, Any]] = []
-        try:
-            iterator = iter(raw_journals)
-        except TypeError:
-            return []
-
-        for journal in iterator:
+        for journal in _included_resources(issue, "journals"):
             if not bool(getattr(journal, "private_notes", False)):
                 continue
             # Skip entries with no notes body (private detail-only records).
