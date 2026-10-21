@@ -200,6 +200,80 @@ async def test_current_user_populated_when_client_works(monkeypatch):
     assert cu["name"] == "Test User"
 
 
+def _user(**fields):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**fields)
+
+
+@pytest.mark.asyncio
+async def test_current_user_comes_from_the_per_request_client():
+    """The lookup goes through the client the tool calls use, so it names
+    whoever those calls run as rather than the server's own account."""
+    from unittest.mock import MagicMock, patch
+
+    from redmine_mcp_server import _client
+    from redmine_mcp_server.tools import meta
+
+    client = MagicMock()
+    client.user.get.return_value = _user(
+        id=108, login="alr", firstname="Andreas", lastname="Lemmer"
+    )
+    with patch.object(_client, "_get_redmine_client", return_value=client):
+        info = await meta._fetch_current_user_info()
+
+    client.user.get.assert_called_once_with("current")
+    assert info == {"id": 108, "login": "alr", "name": "Andreas Lemmer"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode, claims",
+    [
+        ("redmine-login", {"redmine_login": "alr", "redmine_api_key": "c" * 40}),
+        ("api-key-login", {"redmine_user_id": 108, "redmine_api_key": "c" * 40}),
+    ],
+)
+async def test_a_signed_in_caller_is_named_by_their_own_key(mode, claims):
+    """These modes carry no server-wide credential, which is why the old
+    lookup, built from REDMINE_API_KEY alone, answered None there. A stray
+    server key must not win over the caller's either."""
+    from unittest.mock import MagicMock, patch
+
+    from redmine_mcp_server import _client
+    from redmine_mcp_server.tools import meta
+
+    token = MagicMock(token="bearer", claims=claims)
+    built = MagicMock()
+    built.user.get.return_value = _user(
+        id=108, login="alr", firstname="Andreas", lastname="Lemmer"
+    )
+    with (
+        patch.object(_client, "REDMINE_AUTH_MODE", mode),
+        patch.object(_client, "REDMINE_API_KEY", "server-key-must-not-be-used"),
+        patch.object(_client, "redmine", None),
+        patch.object(_client, "get_access_token", return_value=token),
+        patch.object(_client, "_new_client", return_value=built) as new_client,
+    ):
+        info = await meta._fetch_current_user_info()
+
+    new_client.assert_called_once_with(key="c" * 40)
+    assert info == {"id": 108, "login": "alr", "name": "Andreas Lemmer"}
+
+
+@pytest.mark.asyncio
+async def test_a_failing_lookup_answers_none():
+    from unittest.mock import patch
+
+    from redmine_mcp_server import _client
+    from redmine_mcp_server.tools import meta
+
+    with patch.object(
+        _client, "_get_redmine_client", side_effect=ConnectionError("down")
+    ):
+        assert await meta._fetch_current_user_info() is None
+
+
 def test_package_version_is_importable():
     """The __version__ attribute is the source of truth for
     server_version. Imports from the package root must keep working."""

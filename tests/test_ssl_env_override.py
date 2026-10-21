@@ -232,19 +232,6 @@ class TestHttpxCallSitesUseSSLConfig:
 
         assert calls and calls[0]["verify"] is False
 
-    @pytest.mark.asyncio
-    async def test_server_info_current_user(self, ssl_disabled):
-        from redmine_mcp_server.tools import meta
-
-        calls = []
-        with (
-            patch.object(_client, "REDMINE_API_KEY", "key"),
-            patch("httpx.AsyncClient", _ClientSpy(calls, _Response())),
-        ):
-            await meta._fetch_current_user_info()
-
-        assert calls and calls[0]["verify"] is False
-
     def test_attachment_download_client_on_redmine_host(self, ssl_disabled):
         from redmine_mcp_server import _ssrf
 

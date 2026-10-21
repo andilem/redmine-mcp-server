@@ -34,52 +34,45 @@ logger = logging.getLogger("redmine_mcp_server")
 
 
 async def _fetch_current_user_info() -> Optional[Dict[str, Any]]:
-    """Return {id, login, name} for the authenticated user, or None on failure.
+    """Return {id, login, name} for the calling user, or None on failure.
 
     Resolves who ``assigned_to_id="me"`` maps to — crucial when a shared
     or robot API key is in use, where "me" is not the human operator.
 
-    Uses ``GET /users/current.json`` via async httpx — works on Redmine 3.x
-    and later. ``/my/account.json`` is not reliably available on older
-    Redmine instances.
+    Asks ``GET /users/current.json`` through ``_get_redmine_client``, the
+    client every tool call uses, so the answer is the identity that call
+    runs as: the configured account in ``legacy`` mode, and the caller's
+    own key or bearer in the per-user modes. Those carry no server-wide
+    credential, so a request built from ``REDMINE_API_KEY`` alone answered
+    None there -- or, with a stray key set, named the server account
+    instead of the caller. The client is blocking and runs in a worker
+    thread; it brings the SSL settings and ``REDMINE_TIMEOUT`` with it.
+    ``/my/account.json`` is not reliably available on older Redmine
+    instances, ``/users/current.json`` is on 3.x and later.
 
     This duplicates ``get_current_user`` and has not been consolidated with
     it; that is the only reason it is a separate path, not any permission
     difference. The endpoint is not admin-gated -- see the
     ``get_current_user`` note in ``oauth_scopes.py`` for why.
     """
+    from .. import _client
+    from .._offload import in_thread
+
+    def _run():
+        return _client._get_redmine_client().user.get("current")
+
     try:
-        import httpx
-        from .. import _client
-
-        url = (_client.REDMINE_URL or "").rstrip("/") + "/users/current.json"
-        if not url.startswith("http"):
-            return None
-
-        if _client.REDMINE_API_KEY:
-            headers = {"X-Redmine-API-Key": _client.REDMINE_API_KEY}
-            auth = None
-        elif _client.REDMINE_USERNAME and _client.REDMINE_PASSWORD:
-            headers = {}
-            auth = (_client.REDMINE_USERNAME, _client.REDMINE_PASSWORD)
-        else:
-            return None
-
-        async with httpx.AsyncClient(timeout=5, **_client.httpx_ssl_kwargs()) as client:
-            r = await client.get(url, headers=headers, auth=auth)
-        if r.status_code != 200:
-            return None
-        user = r.json().get("user", {})
-        firstname = user.get("firstname", "") or ""
-        lastname = user.get("lastname", "") or ""
-        return {
-            "id": user.get("id"),
-            "login": user.get("login"),
-            "name": f"{firstname} {lastname}".strip() or None,
-        }
+        user = await in_thread(_run)
     except Exception as exc:
         logger.warning("get_mcp_server_info: could not fetch current user: %s", exc)
         return None
+    firstname = getattr(user, "firstname", "") or ""
+    lastname = getattr(user, "lastname", "") or ""
+    return {
+        "id": getattr(user, "id", None),
+        "login": getattr(user, "login", None),
+        "name": f"{firstname} {lastname}".strip() or None,
+    }
 
 
 @mcp.tool()
@@ -91,8 +84,9 @@ async def get_mcp_server_info() -> Dict[str, Any]:
     - Detect deployment lag: compare ``server_version`` against the
       release you expect before relying on a recently-shipped fix.
     - Understand who ``"me"`` resolves to: ``current_user`` shows the
-      identity behind the configured API key. When a shared or robot API
-      key is in use, ``assigned_to_id="me"`` will match **that** account,
+      identity this call runs as -- the configured API key in ``legacy``
+      mode, the caller's own in the per-user modes. When a shared or robot
+      API key is in use, ``assigned_to_id="me"`` will match **that** account,
       not the human operator — call this tool first if issue queries
       assigned to "me" return unexpectedly empty results.
     - Check which plugin-gated tool families are active.
@@ -107,7 +101,9 @@ async def get_mcp_server_info() -> Dict[str, Any]:
         - ``read_only_mode`` (bool): whether ``REDMINE_MCP_READ_ONLY``
           is enabled. When ``True``, all write tools refuse with the
           standard read-only error.
-        - ``auth_mode`` (str): ``"oauth"`` or ``"legacy"``.
+        - ``auth_mode`` (str): the configured ``REDMINE_AUTH_MODE``, e.g.
+          ``"legacy"``, ``"legacy-per-user"``, ``"oauth"``,
+          ``"oauth-proxy"`` or ``"api-key-login"``.
         - ``current_user`` (dict | None): ``{id, login, name}`` for the
           authenticated Redmine user. ``None`` if the server cannot reach
           Redmine (check ``/health`` for connectivity status).
