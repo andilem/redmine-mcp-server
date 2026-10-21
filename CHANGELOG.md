@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `update_redmine_issue` takes `notes_upload_id`, so a long new comment can
+  come from a file staged with `create_upload_ticket` instead of being
+  written out into `fields["notes"]`. #317 gave that route to replacing a
+  note through `manage_issue_note`, which is no way round it for a new one:
+  a note goes out by mail to the watchers as soon as it is written, so the
+  first version is the one everyone reads. `private_notes` still goes in
+  `fields`, and the response reports `notes_length` and `notes_sha256`
+  rather than echoing the text. Mutually exclusive with `notes` in
+  `fields`.
 - Easy Redmine checklist tools: `list_easy_checklists`,
   `manage_easy_checklist` (create, update), `manage_easy_checklist_item`
   (create, update) and `delete_easy_checklist`, behind `REDMINE_EASY_ENABLED`
@@ -92,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then, and passing them through as well would report them twice.
 
 ### Fixed
+- `get_mcp_server_info` named no `current_user` in the per-user auth modes.
+  It asked Redmine with the server-wide credential alone, which those modes
+  do not have, so it answered `null` there while `get_current_user` named the
+  caller -- and with a stray `REDMINE_API_KEY` set it would have named the
+  server account instead. It now asks through the same per-request client as
+  every tool call.
 - `manage_easy_checklist(update)` reported a successful write as "Access
   denied" whenever the checklist could not be read back afterwards. The
   read-back is a courtesy -- the PUT answers with nothing, so the state has

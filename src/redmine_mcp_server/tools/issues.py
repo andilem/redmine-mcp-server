@@ -2596,6 +2596,7 @@ async def update_redmine_issue(
     description_edits: Optional[List[Dict[str, str]]] = None,
     description_expected_sha256: Optional[str] = None,
     description_upload_id: Optional[str] = None,
+    notes_upload_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Update an existing Redmine issue.
 
@@ -2651,7 +2652,8 @@ async def update_redmine_issue(
         issue_id: The issue to update.
         fields: The fields to change, including ``notes`` for a comment. A
             custom field is keyed by its name or by ``cf_<id>``. Attachments
-            do not go here -- see ``uploads``.
+            do not go here -- see ``uploads``; nor does a long comment -- see
+            ``notes_upload_id``.
         uploads: Files to attach to the issue. Maximum 10 items, 50 MiB
             each. Every item carries exactly one content source:
 
@@ -2714,6 +2716,17 @@ async def update_redmine_issue(
             text really is all new rather than edited: the content travels
             from disk to this server instead of through the conversation.
             Mutually exclusive with the other two ways of setting it.
+        notes_upload_id: Take a new comment from a file staged with
+            ``create_upload_ticket``, decoded as UTF-8. **The way to add a
+            long comment.** A note goes out by mail to the watchers as soon
+            as it is written, so there is no writing a short one and
+            replacing it afterwards: the first version is the one everyone
+            reads. ``private_notes`` still goes in ``fields``. The response
+            then reports ``notes_length`` and ``notes_sha256`` rather than
+            the text, which would put it in the conversation after all.
+            Mutually exclusive with ``notes`` in ``fields``. Replacing an
+            existing comment from a file is ``manage_issue_note``'s
+            ``notes_upload_id``.
     """
 
     if _is_read_only_mode():
@@ -2756,15 +2769,40 @@ async def update_redmine_issue(
             )
         }
 
+    # The same route for a new comment, which #317 left to editing one.
+    if notes_upload_id and "notes" in update_fields:
+        return {
+            "error": (
+                "Set the note one way at a time; got notes in fields, "
+                "notes_upload_id."
+            )
+        }
+
+    # Asked once for both staged texts. Every check above is local, so a
+    # call refused there never pays for the Redmine lookup the OAuth modes
+    # may need.
+    staged_owner = (
+        await resolve_staged_upload_owner()
+        if description_upload_id or notes_upload_id
+        else None
+    )
+
     if description_upload_id:
         staged_text, staged_error = _text_from_staged_upload(
-            description_upload_id,
-            "description",
-            owner=await resolve_staged_upload_owner(),
+            description_upload_id, "description", owner=staged_owner
         )
         if staged_error is not None:
             return staged_error
         update_fields["description"] = staged_text
+
+    staged_notes: Optional[str] = None
+    if notes_upload_id:
+        staged_notes, staged_error = _text_from_staged_upload(
+            notes_upload_id, "notes", owner=staged_owner
+        )
+        if staged_error is not None:
+            return staged_error
+        update_fields["notes"] = staged_notes
 
     if description_edits is not None:
 
@@ -3056,7 +3094,15 @@ async def update_redmine_issue(
                 {"resource_type": "issue", "resource_id": issue_id},
             )
 
-    return await in_thread(_run)
+    result = await in_thread(_run)
+    if staged_notes is not None and "error" not in result:
+        # Echoing a note that arrived as a file would put it in the
+        # conversation after all, as on manage_issue_note (#317).
+        result["notes_length"] = len(staged_notes)
+        result["notes_sha256"] = hashlib.sha256(
+            staged_notes.encode("utf-8")
+        ).hexdigest()
+    return result
 
 
 @mcp.tool()

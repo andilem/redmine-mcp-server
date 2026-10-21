@@ -1602,6 +1602,16 @@ A failed edit is reported with the index of the pair that failed and leaves the 
 
 `description`, `description_edits` and `description_upload_id` are mutually exclusive; passing more than one is refused, naming which were given.
 
+**A long new comment:** `notes_upload_id` (string, optional) takes the comment from a file staged with [`create_upload_ticket`](#create_upload_ticket), decoded as UTF-8, the same way `description_upload_id` takes the description. A note goes out by mail to the watchers as soon as it is written, so writing a short one and replacing it with [`manage_issue_note`](#manage_issue_note) afterwards is no way round a long one: the first version is the one everyone reads. `private_notes` still goes in `fields`. The response then carries `notes_length` and `notes_sha256` instead of the text, which would otherwise land in the conversation after all. Mutually exclusive with `notes` in `fields`; combines with every other parameter, `description_upload_id` included.
+
+```python
+update_redmine_issue(
+    issue_id=123,
+    fields={"private_notes": True},
+    notes_upload_id="6f1e...",
+)
+```
+
 **Returns:** Updated issue dictionary. When `uploads` is provided and at least one attachment succeeds, the response includes:
 - `attachments` (list): Metadata for each attached file (id, filename, filesize, content_url, etc.).
 - `journal_id` (integer): ID of the journal entry the attachments were placed on.
@@ -2848,7 +2858,7 @@ Reserve a slot for a file on the caller's own machine and return the URL to send
 **Flow:**
 1. Call `create_upload_ticket`.
 2. Send the file to `upload_url` in one HTTP request, ticket in the `X-Upload-Ticket` header, the raw file as the body. The response carries `upload_id`, `size` and `sha256`. Multipart is deliberately not accepted — Starlette's `request.form()` buffers the whole body before its size can be checked, so the cap would not hold.
-3. Name that `upload_id` as the content source — in `uploads` on `create_redmine_issue`, `update_redmine_issue` or `manage_redmine_wiki_page`, or on `upload_file`. A staged file can also *be* a long text field rather than an attachment: `description_upload_id` on `create_redmine_issue` and `update_redmine_issue`, `notes_upload_id` on `manage_issue_note`, and `text_upload_id` on `manage_redmine_wiki_page`.
+3. Name that `upload_id` as the content source — in `uploads` on `create_redmine_issue`, `update_redmine_issue` or `manage_redmine_wiki_page`, or on `upload_file`. A staged file can also *be* a long text field rather than an attachment: `description_upload_id` on `create_redmine_issue` and `update_redmine_issue`, `notes_upload_id` on `update_redmine_issue` (a new comment) and `manage_issue_note` (replacing one), and `text_upload_id` on `manage_redmine_wiki_page`.
 
 ```bash
 curl -sS -H "X-Upload-Ticket: $TICKET" --data-binary @mockup.png "$UPLOAD_URL"
